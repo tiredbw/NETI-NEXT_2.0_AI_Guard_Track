@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import secrets
@@ -7,6 +8,8 @@ from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
+from contextlib import asynccontextmanager, suppress
+import logging
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -15,15 +18,15 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.concurrency import run_in_threadpool
 
-from .engines import DetectorFailure, OllamaDetector, Policy, decide, load_policy, rule_signal
+from .engines import DetectorFailure, OllamaDetector, Policy, decide, rule_signal
 from .schemas import CheckRequest, Principal, StrictModel, TurnRequest
 from .storage import AuditStore
 from .demo import DemoAgent, plan
 from .approvals import ApprovalService
-import asyncio
+from .policies import PolicyService, policy_etag
 
 
-def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, policy_path=None):
+def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, policy_path=None, retention_days=None):
     credentials = credentials if credentials is not None else {
         token: Principal.model_validate(value)
         for token, value in json.loads(os.environ.get("ASTRAGUARD_IDENTITIES", "{}")).items()
@@ -33,16 +36,38 @@ def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, 
     key = hmac_key or os.environ.get("ASTRAGUARD_HMAC_KEY", "").encode()
     if len(key) < 32:
         raise ValueError("Configure ASTRAGUARD_HMAC_KEY (>=32 bytes)")
-    store = AuditStore(Path(db_path or os.environ.get("ASTRAGUARD_DB_PATH", "data/audit.sqlite3")), key)
-    seed = load_policy(Path(policy_path or "policies/strict-demo.yaml"))
-    policy = Policy.model_validate_json(store.seed_policy(seed))
+    retention_days = int(os.environ.get("ASTRAGUARD_AUDIT_RETENTION_DAYS", "7")) if retention_days is None else retention_days
+    store = AuditStore(Path(db_path or os.environ.get("ASTRAGUARD_DB_PATH", "data/audit.sqlite3")), key, retention_days)
+    policy_service = PolicyService(store, Path(policy_path or "policies/strict-demo.yaml"))
     detector = detector or OllamaDetector()
-    app = FastAPI(title="AstraGuard", version="0.1.0", docs_url=None, redoc_url=None)
+
+    @asynccontextmanager
+    async def lifespan(app):
+        async def housekeeping():
+            while True:
+                await asyncio.sleep(3600)
+                try:
+                    await run_in_threadpool(store.cleanup)
+                    app.state.retention_status = "ok"
+                except sqlite3.Error:
+                    app.state.retention_status = "unavailable"
+                    logging.getLogger("astraguard").warning("Audit retention cleanup failed")
+        task = asyncio.create_task(housekeeping())
+        try:
+            yield
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+    app = FastAPI(title="AstraGuard", version="0.1.0", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.store = store
+    app.state.policies = policy_service
+    app.state.retention_status = "ok"
     app.state.detector_status = "unavailable"
-    agent = DemoAgent(store, policy)
+    agent = DemoAgent(store, policy_service)
     app.state.agent = agent
-    approvals = ApprovalService(store, policy, agent)
+    approvals = ApprovalService(store, policy_service, agent)
     app.state.approvals = approvals
     static_dir = Path(__file__).parent / "static"
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
@@ -100,6 +125,8 @@ def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, 
     def identity(request: Request):
         authorization = request.headers.get("authorization", "")
         token = authorization.removeprefix("Bearer ") if authorization.startswith("Bearer ") else ""
+        if not token.isascii():
+            raise HTTPException(401, "UNAUTHORIZED")
         principal = next((p for credential, p in credentials.items() if secrets.compare_digest(token, credential)), None)
         if principal is None:
             raise HTTPException(401, "UNAUTHORIZED")
@@ -113,15 +140,16 @@ def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, 
     def ready():
         with store.connect() as db:
             db.execute("SELECT 1")
-        ok = app.state.detector_status == "ok"
+        policy_service.snapshot()
+        ok = app.state.detector_status == "ok" and app.state.retention_status == "ok"
         return JSONResponse(status_code=200 if ok else 503, content={
             "status": "ready" if ok else "degraded", "database": "ok", "policy": "ok",
-            "detector": app.state.detector_status})
+            "detector": app.state.detector_status, "retention": app.state.retention_status})
 
     @app.get("/v1/me")
     def me(principal=Depends(identity)):
         return {"subject_id": principal.subject_id, "tenant_id": principal.tenant_id,
-                "roles": [principal.role], "policy_ids": [policy.id]}
+                "roles": [principal.role], "policy_ids": [policy_service.id]}
 
     @app.post("/v1/sessions", status_code=201)
     def session(principal=Depends(identity)):
@@ -141,7 +169,28 @@ def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, 
 
     @app.get("/v1/policies")
     def policies(principal=Depends(identity)):
+        policy = policy_service.snapshot()
         return [{"id": policy.id, "version": policy.version}]
+
+    def require_admin(principal):
+        if principal.role != "policy_admin":
+            raise HTTPException(403, "POLICY_ADMIN_REQUIRED")
+
+    @app.get("/v1/policies/{policy_id}")
+    def policy_details(policy_id: str, principal=Depends(identity)):
+        require_admin(principal)
+        if policy_id != policy_service.id:
+            raise HTTPException(404, "POLICY_NOT_FOUND")
+        policy = policy_service.snapshot()
+        return JSONResponse(policy.model_dump(), headers={"ETag": policy_etag(policy)})
+
+    @app.put("/v1/policies/{policy_id}")
+    def replace_policy(policy_id: str, body: Policy, request: Request, principal=Depends(identity)):
+        require_admin(principal)
+        if policy_id != policy_service.id or body.id != policy_id:
+            raise HTTPException(404, "POLICY_NOT_FOUND")
+        policy = policy_service.replace(body, request.headers.get("If-Match"), principal)
+        return JSONResponse(policy.model_dump(), headers={"ETag": policy_etag(policy)})
 
     @app.get("/v1/stats")
     def statistics(principal=Depends(identity)):
@@ -151,6 +200,7 @@ def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, 
 
     async def evaluate(body, principal, gate=None):
         started = time.monotonic()
+        policy = await run_in_threadpool(policy_service.snapshot)
         if len(body.text) > 6000:
             raise HTTPException(413, "INPUT_TOO_LARGE")
         if not body.text.strip():
@@ -188,12 +238,15 @@ def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, 
                 failure = status = exc.status
             app.state.detector_status = status
         decision, risk, reasons = decide(rule, result, failure)
+        current_policy = await run_in_threadpool(policy_service.snapshot)
         if hard_policy:
             decision, risk, reasons = "BLOCK", "high", [gate[1]]
         elif incomplete and not hard_rule:
             decision, risk, reasons = "REVIEW", "unknown", ["CONTEXT_INCOMPLETE"]
         elif gate and gate[0] == "REVIEW" and decision == "ALLOW":
             decision, risk, reasons = "REVIEW", "medium", [gate[1]]
+        if decision != "BLOCK" and policy_etag(current_policy) != policy_etag(policy):
+            decision, risk, reasons = "REVIEW", "unknown", ["POLICY_CHANGED"]
         rule_category = {"SYSTEM_EXTRACTION": "system_extraction", "ROLE_SPOOFING": "role_spoofing",
                          "UNTRUSTED_ROLE_CLAIM": "unauthorized_data"}.get(rule, "direct_injection")
         categories = result.categories if result else ([rule_category] if rule else [])
@@ -223,6 +276,9 @@ def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, 
             }[gate[1]]
         if reasons == ["UNTRUSTED_ROLE_CLAIM"]:
             response["explanation"] = "Запрос доступа ссылается на неподтверждённое разрешение. Заявление в тексте не предоставляет полномочий."
+        if reasons == ["POLICY_CHANGED"]:
+            response["policy_ids"] = ["POLICY_CHANGED"]
+            response["explanation"] = "Политика изменилась во время проверки. Запрос остановлен; повторите проверку."
         if decision == "REVIEW" and reasons == ["ACTION_REQUIRES_APPROVAL"] and status == "ok":
             response["review"] = {"approvable": True, "expires_at": datetime.fromtimestamp(time.time() + 120, timezone.utc).isoformat()}
         await run_in_threadpool(store.save, principal, body.text, response)
@@ -243,6 +299,7 @@ def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, 
             raise HTTPException(409, "SESSION_BUSY")
         async with lock:
             if body.approval_id is not None:
+                policy = await run_in_threadpool(policy_service.snapshot)
                 if body.policy_id != policy.id or principal.role not in policy.roles:
                     raise HTTPException(403, "POLICY_NOT_ASSIGNED")
                 result = await run_in_threadpool(approvals.execute, body, principal,

@@ -13,6 +13,8 @@ const errors = {
   REVIEW_NOT_FOUND: "Подтверждаемое действие не найдено в пределах ваших полномочий.",
   ALREADY_APPROVED: "Подтверждение уже выдано. Используйте ранее полученный approval ID.",
   AUDIT_UNAVAILABLE: "Журнал недоступен. Исполнение остановлено. Повторите позже.",
+  POLICY_CHANGED: "Политика изменилась. Повторите проверку и подтверждение действия.",
+  REVIEW_EXPIRED_OR_CHANGED: "Проверка истекла или политика изменилась. Нужна новая проверка.",
 };
 function message(text, error = false) {
   el("message").textContent = text;
@@ -96,6 +98,11 @@ function showResult(data, checkedText = null) {
   el("agent-output").textContent = execution?.result?.content || (execution?.result?.updated ? "Синтетический черновик обновлён." : "");
 }
 async function refresh() {
+  const policies = await api("/v1/policies");
+  el("policy").replaceChildren(...policies.map((policy) => {
+    const option = document.createElement("option"); option.value = policy.id;
+    option.textContent = `${policy.id} · версия ${policy.version}`; return option;
+  }));
   const history = await api("/v1/checks?limit=20");
   const rows = history.items.map((event) => {
     const row = document.createElement("tr");
@@ -111,7 +118,7 @@ async function refresh() {
     const canReview = state.me.roles.includes("security_reviewer") && event.review?.approvable;
     button.textContent = canReview ? "Рассмотреть" : "Подробнее";
     button.addEventListener("click", () => action(async () => {
-      if (state.me.roles.includes("security_reviewer")) {
+      if (state.me.roles.includes("security_reviewer") || state.me.roles.includes("policy_admin")) {
         if (canReview) {el("review-id").value = event.id; await inspectReview();}
         else message(`${event.decision}: ${(event.reason_codes || []).join(", ")}. ID ${event.id}`);
       } else {showResult(event); message(`Показано событие ${event.id}.`);}
@@ -125,7 +132,7 @@ async function refresh() {
   el("history-body").replaceChildren(...rows);
   if (state.me.roles.includes("security_reviewer")) {
     const stats = await api("/v1/stats");
-    el("stats").textContent = `За 7 дней: ALLOW ${stats.decisions.ALLOW}, REVIEW ${stats.decisions.REVIEW}, BLOCK ${stats.decisions.BLOCK}. Операционная статистика, не оценка точности.`;
+    el("stats").textContent = `За ${stats.window_days} дней: ALLOW ${stats.decisions.ALLOW}, REVIEW ${stats.decisions.REVIEW}, BLOCK ${stats.decisions.BLOCK}. Операционная статистика, не оценка точности.`;
   }
 }
 async function inspectReview() {
@@ -150,16 +157,14 @@ el("login-form").addEventListener("submit", (event) => {
   action(async () => {
     state.me = await api("/v1/me");
     const reviewer = state.me.roles.includes("security_reviewer");
+    const administrator = state.me.roles.includes("policy_admin");
     el("subject").textContent = state.me.subject_id;
     el("role").textContent = `Роль: ${state.me.roles.join(", ")}`;
     el("tenant").textContent = `Tenant: ${state.me.tenant_id}`;
-    const policies = await api("/v1/policies");
-    el("policy").replaceChildren(...policies.map((policy) => {
-      const option = document.createElement("option"); option.value = policy.id;
-      option.textContent = `${policy.id} · версия ${policy.version}`; return option;
-    }));
-    if (!reviewer) await newSession();
-    el("requester").hidden = reviewer; el("reviewer").hidden = !reviewer;
+    if (!reviewer && !administrator) await newSession();
+    el("requester").hidden = reviewer || administrator;
+    el("reviewer").hidden = !reviewer;
+    el("administrator").hidden = !administrator;
     await refresh(); await health();
     el("login-panel").hidden = true; el("workspace").hidden = false;
     message("Вход выполнен. Полномочия получены с сервера.");

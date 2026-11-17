@@ -29,8 +29,13 @@ Launcher создаёт `data/demo-access.json` со случайными creden
 | operator | A | operator |
 | reviewer | A | security_reviewer |
 | bob | B | viewer |
+| policy-admin | control | policy_admin |
 
 Скопировать нужный token из локального файла в HTTP-клиент как `Authorization: Bearer TOKEN`. Не отправлять файл в переписку, Git или скринкасты. Launcher не предоставляет endpoint выдачи секретов и не меняет роль через клиентский параметр.
+
+Для существующего файла launcher добавит credential policy-admin, сохранив остальные credentials и HMAC. Каталог состояния должен быть приватным (0700); symlink вместо credential-файла не принимается. Администратор управляет общим профилем и не получает доступа к документам. Подробности — [POLICY_OPERATIONS.md](POLICY_OPERATIONS.md).
+
+При необходимости используйте `--port 8001` для отдельного тестового сервера на loopback.
 
 Веб-интерфейс: http://127.0.0.1:8000. [Инструкция и сценарий](UI.md). Локальная справка API: `/docs`, полная OpenAPI-схема: `/openapi.json`.
 

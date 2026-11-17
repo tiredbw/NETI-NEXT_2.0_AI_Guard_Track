@@ -75,6 +75,12 @@
         <form id="review-form"><label for="review-id">ID проверки</label><div class="actions"><input id="review-id" required spellcheck="false" autocomplete="off"><button type="submit">Посмотреть действие</button></div></form>
         <section id="review-details" hidden><h2>Точное действие</h2><dl id="review-summary"></dl><button id="approve-action">Подтвердить действие</button><p id="approval-result" class="copyable"></p></section>
       </section>
+      <section id="administrator" hidden>
+        <h1>Управление политиками</h1>
+        <p>Эта учётная запись обновляет общий профиль безопасности через API. Она не даёт доступа к документам или подтверждению действий пользователей.</p>
+        <p>Получите текущую политику через GET /v1/policies/strict-demo-v1. Для PUT передайте её ETag в If-Match; номер новой версии назначит сервер.</p>
+        <p><a href="/docs">Локальная справка API</a>. Изменение политики отменяет ранее выданные подтверждения.</p>
+      </section>
       <section class="history">
         <div class="section-heading"><h2>История проверок</h2><button id="refresh" class="secondary">Обновить</button></div>
         <p class="hint">Последние 20 событий в пределах ваших полномочий. Исходные запросы в журнале не сохраняются.</p>

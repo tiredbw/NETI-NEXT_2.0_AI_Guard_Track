@@ -88,7 +88,10 @@ def test_changed_authority_or_context(flow, mutation):
         if mutation == "version":
             db.execute("UPDATE resources SET version=version+1 WHERE id='A2'")
     if mutation == "policy":
-        app.state.agent.policy.version += 1
+        from astraguard.policies import policy_etag
+        current = app.state.policies.snapshot()
+        app.state.policies.replace(current, policy_etag(current),
+                                   Principal(subject_id="admin", tenant_id="control", role="policy_admin"))
     if mutation == "context":
         assert client.post("/v1/agent/turns", json=body | {"text": "Другой вопрос"}).status_code == 200
     assert execute(client, body, approval).status_code == 409
@@ -148,7 +151,7 @@ def test_restart_loses_pending_safely(flow):
     # New process has no pending content, even when sessions are recreated.
     from astraguard.approvals import ApprovalService
     from astraguard.schemas import TurnRequest
-    service = ApprovalService(app.state.store, app.state.agent.policy, app.state.agent)
+    service = ApprovalService(app.state.store, app.state.policies, app.state.agent)
     principal = Principal(subject_id="operator", tenant_id="A", role="operator")
     request = TurnRequest.model_validate(body | {"approval_id": approval})
     from fastapi import HTTPException
@@ -193,3 +196,20 @@ def test_stats_scope_and_approval_not_double_counted(flow):
     stats = client.get("/v1/stats").json()
     assert stats["sample_size"] == 0
     assert stats["latency_ms"]["p95"] is None
+
+
+def test_policy_change_during_approval_grant_is_atomic(flow, monkeypatch):
+    client, app, _, _, check = flow
+    from astraguard.policies import policy_etag
+    original = app.state.approvals.describe
+    def changing(check_id, reviewer):
+        details = original(check_id, reviewer)
+        policy = app.state.policies.snapshot()
+        app.state.policies.replace(policy, policy_etag(policy),
+                                   Principal(subject_id="admin", tenant_id="control", role="policy_admin"))
+        return details
+    monkeypatch.setattr(app.state.approvals, "describe", changing)
+    client.headers["Authorization"] = "Bearer " + "r" * 32
+    assert client.post(f'/v1/reviews/{check["id"]}/approve', json={}).status_code == 409
+    with app.state.store.connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM approvals").fetchone()[0] == 0

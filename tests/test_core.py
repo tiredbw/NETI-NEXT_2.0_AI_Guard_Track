@@ -188,3 +188,8 @@ def test_unverified_permission_minimal_pair():
     attack = DetectorResult(schema_version="1", intent="attack", categories=["privilege_escalation"],
                             severity="critical", reason_codes=["PRIVILEGE_ESCALATION"])
     assert decide("UNTRUSTED_ROLE_CLAIM", attack, None)[0] == "BLOCK"
+
+
+def test_non_ascii_credential_is_unauthorized_not_server_error(setup):
+    client, _, _, _ = setup
+    assert client.get("/v1/me", headers={b"Authorization": b"Bearer \xff"}).status_code == 401

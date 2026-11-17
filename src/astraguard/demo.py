@@ -37,28 +37,36 @@ def tool_policy(db, policy, principal, intent):
 
 
 class DemoAgent:
-    def __init__(self, store, policy):
-        self.store, self.policy = store, policy
+    def __init__(self, store, policies):
+        self.store, self.policies = store, policies
         self.invocations = 0
+
+    @property
+    def policy(self):
+        return self.policies.snapshot()
 
     def preflight(self, principal, intent):
         if intent is None:
             return None
         with self.store.connect() as db:
-            return tool_policy(db, self.policy, principal, intent)
+            return tool_policy(db, self.policies.snapshot(db), principal, intent)
 
     def invoke(self, principal, intent, parent):
         invocation_id = str(uuid4())
         child = {
             "id": str(uuid4()), "created_at": datetime.now(timezone.utc).isoformat(),
             "parent_id": parent["id"], "session_id": parent["session_id"],
-            "policy_version": self.policy.version, "policy_ids": [],
+            "policy_ids": [],
             "detector": {"status": "skipped_hard_deny", "model": None, "digest": None},
             "threats": [], "timing_ms": {},
         }
         with self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            decision, reason = tool_policy(db, self.policy, principal, intent) if intent else ("ALLOW", "BENIGN_REQUEST")
+            policy = self.policies.snapshot(db)
+            decision, reason = tool_policy(db, policy, principal, intent) if intent else ("ALLOW", "BENIGN_REQUEST")
+            if decision != "BLOCK" and parent["policy_version"] != policy.version:
+                decision, reason = "REVIEW", "POLICY_CHANGED"
+            child["policy_version"] = policy.version
             child.update(decision=decision, risk="low" if decision == "ALLOW" else "high",
                          reason_codes=[reason], event_type="tool_execution" if intent else "agent_execution",
                          agent_invocation_id=invocation_id,

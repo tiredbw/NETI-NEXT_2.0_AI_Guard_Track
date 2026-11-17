@@ -9,16 +9,26 @@ from typing import Literal, Protocol
 
 import httpx
 import yaml
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, model_validator
 from yaml.tokens import AliasToken, AnchorToken
 
 from .schemas import DetectorResult, StrictModel
 
 
 class RolePolicy(StrictModel):
-    allowed_tools: list[Literal["documents.read", "drafts.update"]]
+    allowed_tools: list[Literal["documents.read", "drafts.update"]] = Field(max_length=2)
     resource_scope: Literal["own_tenant"]
-    confirmation_actions: list[Literal["drafts.update"]]
+    confirmation_actions: list[Literal["drafts.update"]] = Field(max_length=1)
+
+    @model_validator(mode="after")
+    def safe_permissions(self):
+        if len(set(self.allowed_tools)) != len(self.allowed_tools):
+            raise ValueError("Duplicate tools")
+        if not set(self.confirmation_actions) <= set(self.allowed_tools):
+            raise ValueError("Confirmation action must be allowed")
+        if "drafts.update" in self.allowed_tools and "drafts.update" not in self.confirmation_actions:
+            raise ValueError("Draft updates always require confirmation")
+        return self
 
 
 class Policy(StrictModel):
@@ -26,14 +36,43 @@ class Policy(StrictModel):
     version: int = Field(ge=1)
     roles: dict[Literal["viewer", "operator"], RolePolicy]
 
+    @model_validator(mode="after")
+    def role_limits(self):
+        if "viewer" in self.roles and "drafts.update" in self.roles["viewer"].allowed_tools:
+            raise ValueError("Viewer cannot write")
+        return self
+
+
+class PolicyLoader(yaml.SafeLoader):
+    def construct_mapping(self, node, deep=False):
+        keys = set()
+        for key_node, _ in node.value:
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                raise ValueError("YAML merges forbidden")
+            key = self.construct_object(key_node, deep=deep)
+            if not isinstance(key, str) or key in keys:
+                raise ValueError("Policy keys must be unique strings")
+            keys.add(key)
+        return super().construct_mapping(node, deep=deep)
+
 
 def load_policy(path: Path) -> Policy:
-    raw = path.read_text()
+    with path.open("rb") as stream:
+        content = stream.read(65537)
+    raw = content.decode("utf-8")
     if len(raw.encode()) > 65536:
         raise ValueError("Policy too large")
-    if any(isinstance(t, (AliasToken, AnchorToken)) for t in yaml.scan(raw)):
-        raise ValueError("YAML aliases forbidden")
-    return Policy.model_validate(yaml.safe_load(raw))
+    depth = 0
+    for token in yaml.scan(raw):
+        if isinstance(token, (AliasToken, AnchorToken)) or type(token).__name__ == "TagToken":
+            raise ValueError("YAML aliases, anchors and tags forbidden")
+        if type(token).__name__ in {"BlockMappingStartToken", "BlockSequenceStartToken", "FlowMappingStartToken", "FlowSequenceStartToken"}:
+            depth += 1
+            if depth > 8:
+                raise ValueError("Policy nesting too deep")
+        elif type(token).__name__ in {"BlockEndToken", "FlowMappingEndToken", "FlowSequenceEndToken"}:
+            depth -= 1
+    return Policy.model_validate(yaml.load(raw, Loader=PolicyLoader))
 
 
 def authorize_tool(policy: Policy, role: str, tool: str, tenant: str, resource_tenant: str):
@@ -42,7 +81,7 @@ def authorize_tool(policy: Policy, role: str, tool: str, tenant: str, resource_t
     permissions = policy.roles.get(role)
     if not permissions or tool not in permissions.allowed_tools:
         return "BLOCK", "TOOL_NOT_ALLOWED"
-    if tool in permissions.confirmation_actions:
+    if tool == "drafts.update" or tool in permissions.confirmation_actions:
         return "REVIEW", "ACTION_REQUIRES_APPROVAL"
     return "ALLOW", "BENIGN_REQUEST"
 

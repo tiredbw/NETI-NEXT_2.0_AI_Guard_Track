@@ -11,7 +11,7 @@ class StrictModel(BaseModel):
 class Principal(StrictModel):
     subject_id: str
     tenant_id: str
-    role: Literal["viewer", "operator", "security_reviewer"]
+    role: Literal["viewer", "operator", "security_reviewer", "policy_admin"]
 
 
 class CheckRequest(StrictModel):
@@ -34,6 +34,7 @@ Reason = Literal[
     "ACTION_REQUIRES_APPROVAL", "UNTRUSTED_ROLE_CLAIM", "AMBIGUOUS_INTENT", "OBFUSCATION",
     "SESSION_ESCALATION", "CONTEXT_INCOMPLETE", "DETECTOR_UNAVAILABLE", "DETECTOR_TIMEOUT",
     "DETECTOR_INVALID_OUTPUT", "DETECTOR_CONTEXT_OVERFLOW", "JAILBREAK_ATTEMPT", "PRIVILEGE_ESCALATION",
+    "POLICY_CHANGED",
 ]
 
 

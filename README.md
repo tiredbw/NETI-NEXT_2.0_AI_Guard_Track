@@ -8,6 +8,8 @@
 
 ## Документы
 
+- [Управление политиками и retention аудита](docs/POLICY_OPERATIONS.md)
+
 - [Архитектура и модель угроз](docs/ARCHITECTURE.md)
 - [Контракты API и данных](docs/API.md)
 - [Методика оценки и 120 тестов](docs/TEST_PLAN.md)

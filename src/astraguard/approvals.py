@@ -11,17 +11,21 @@ from .demo import plan, tool_policy
 
 
 class ApprovalService:
-    def __init__(self, store, policy, agent):
-        self.store, self.policy, self.agent = store, policy, agent
+    def __init__(self, store, policies, agent):
+        self.store, self.policies, self.agent = store, policies, agent
         self.pending = {}
+
+    @property
+    def policy(self):
+        return self.policies.snapshot()
 
     def binding(self, body):
         raw = json.dumps({"text": body.text, "session_id": str(body.session_id), "policy_id": body.policy_id},
                          sort_keys=True, ensure_ascii=False)
         return hmac.new(self.store.key, raw.encode(), hashlib.sha256).hexdigest()
 
-    def policy_hash(self):
-        return hashlib.sha256(self.policy.model_dump_json().encode()).hexdigest()
+    def policy_hash(self, db=None):
+        return hashlib.sha256(self.policies.snapshot(db).model_dump_json().encode()).hexdigest()
 
     def remember(self, body, principal, check, history):
         now = time.time()
@@ -30,11 +34,15 @@ class ApprovalService:
             raise HTTPException(429, "PENDING_CAPACITY")
         intent = plan(body.text)
         with self.store.connect() as db:
-            if tool_policy(db, self.policy, principal, intent)[0] != "REVIEW":
+            policy = self.policies.snapshot(db)
+            if check["policy_version"] != policy.version:
+                raise HTTPException(409, "POLICY_CHANGED")
+            if tool_policy(db, policy, principal, intent)[0] != "REVIEW":
                 raise HTTPException(409, "RESOURCE_CHANGED")
             version = db.execute("SELECT version FROM resources WHERE id=?", (intent.resource_id,)).fetchone()[0]
+            policy_hash = self.policy_hash(db)
         self.pending[check["id"]] = {"body": body, "principal": principal, "check": check,
-                                      "version": version, "hash": self.policy_hash(), "expires": now + 120,
+                                      "version": version, "hash": policy_hash, "expires": now + 120,
                                       "history": list(history)}
 
     def approve(self, check_id, reviewer):
@@ -43,6 +51,13 @@ class ApprovalService:
         approval_id = str(uuid4())
         with self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            if pending["hash"] != self.policy_hash(db) or pending["expires"] <= time.time():
+                raise HTTPException(409, "REVIEW_EXPIRED_OR_CHANGED")
+            intent = plan(pending["body"].text)
+            if tool_policy(db, self.policies.snapshot(db), pending["principal"], intent)[0] != "REVIEW":
+                raise HTTPException(409, "ACTION_NO_LONGER_PERMITTED")
+            if db.execute("SELECT version FROM resources WHERE id=?", (intent.resource_id,)).fetchone()[0] != pending["version"]:
+                raise HTTPException(409, "RESOURCE_CHANGED")
             if db.execute("SELECT 1 FROM approvals WHERE check_id=?", (check_id,)).fetchone():
                 raise HTTPException(409, "ALREADY_APPROVED")
             db.execute("INSERT INTO approvals(id,check_id,tenant,requester,reviewer,binding,policy_hash,resource_version,expires) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -50,7 +65,7 @@ class ApprovalService:
                         self.binding(pending["body"]), pending["hash"], pending["version"], pending["expires"]))
             self.store.insert(db, reviewer, check_id, {"id": str(uuid4()), "created_at": datetime.now(timezone.utc).isoformat(),
                 "event_type": "approval_granted", "parent_id": check_id, "decision": "REVIEW", "risk": "medium",
-                "reason_codes": ["ACTION_REQUIRES_APPROVAL"], "policy_version": self.policy.version})
+                "reason_codes": ["ACTION_REQUIRES_APPROVAL"], "policy_version": pending["check"]["policy_version"]})
         return {"approval_id": approval_id, "expires_at": datetime.fromtimestamp(pending["expires"], timezone.utc).isoformat()}
 
     def describe(self, check_id, reviewer):
@@ -94,10 +109,11 @@ class ApprovalService:
                 raise HTTPException(409, "APPROVAL_EXPIRED_OR_USED")
             if pending["history"] != history:
                 raise HTTPException(409, "SESSION_CONTEXT_CHANGED")
-            if not hmac.compare_digest(expected, binding) or policy_hash != self.policy_hash():
+            policy = self.policies.snapshot(db)
+            if not hmac.compare_digest(expected, binding) or policy_hash != self.policy_hash(db):
                 raise HTTPException(409, "APPROVAL_MISMATCH")
             intent = plan(body.text)
-            if intent is None or intent.tool != "drafts.update" or tool_policy(db, self.policy, principal, intent) != ("REVIEW", "ACTION_REQUIRES_APPROVAL"):
+            if intent is None or intent.tool != "drafts.update" or tool_policy(db, policy, principal, intent) != ("REVIEW", "ACTION_REQUIRES_APPROVAL"):
                 raise HTTPException(409, "ACTION_NO_LONGER_PERMITTED")
             current = db.execute("SELECT version FROM resources WHERE id=?", (intent.resource_id,)).fetchone()[0]
             if current != version:

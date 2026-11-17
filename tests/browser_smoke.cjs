@@ -81,8 +81,34 @@ const path = require("node:path");
     await operator.locator("#logout").click();
     await operator.locator("#login-panel").waitFor({state: "visible"});
     assert.equal(await operator.locator("#prompt").inputValue(), "");
+    const admin = await browser.newPage({viewport: {width: 1200, height: 900}});
+    await login(admin, "policy-admin");
+    assert.equal(await admin.locator("#administrator").isVisible(), true);
+    assert.equal(await admin.locator("#requester").isHidden(), true);
+    const adminHeaders = {Authorization: "Bearer " + key("policy-admin")};
+    const current = await admin.request.get(base + "/v1/policies/strict-demo-v1", {headers: adminHeaders});
+    const policy = await current.json();
+    const restricted = JSON.parse(JSON.stringify(policy));
+    restricted.roles.viewer.allowed_tools = [];
+    const update = await admin.request.put(base + "/v1/policies/strict-demo-v1", {
+      headers: {...adminHeaders, "If-Match": current.headers().etag}, data: restricted});
+    assert.equal(update.status(), 200);
+    const stale = await admin.request.put(base + "/v1/policies/strict-demo-v1", {
+      headers: {...adminHeaders, "If-Match": current.headers().etag}, data: restricted});
+    assert.equal(stale.status(), 412);
+    const viewer = await browser.newPage({viewport: {width: 390, height: 844}});
+    await login(viewer, "alice");
+    await send(viewer, "/read A1");
+    assert.equal(await viewer.locator("#decision").textContent(), "BLOCK");
+    assert.match(await viewer.locator("#trace").textContent(), /Вызовов целевого агента: 0/);
+    const updated = await update.json();
+    policy.version = updated.version;
+    const restore = await admin.request.put(base + "/v1/policies/strict-demo-v1", {
+      headers: {...adminHeaders, "If-Match": update.headers().etag}, data: policy});
+    assert.equal(restore.status(), 200);
+    await admin.screenshot({path: path.join(artifacts, "administrator.png"), fullPage: true});
     assert.deepEqual(errors, []);
-    console.log("PASS: login, own read, BLOCK stops forwarding, separate reviewer, approved write, empty browser storage, mobile overflow, logout.");
+    console.log("PASS: login, own read, BLOCK stops forwarding, separate reviewer, approved write, XSS text, empty browser storage, mobile overflow, logout, admin policy update, stale ETag, live ACL change.");
     console.log(`Screenshots: ${artifacts}`);
   } finally {await browser.close();}
 })().catch((error) => {console.error(error); process.exitCode = 1;});
