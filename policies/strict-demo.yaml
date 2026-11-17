@@ -1,0 +1,11 @@
+id: strict-demo-v1
+version: 1
+roles:
+  viewer:
+    allowed_tools: [documents.read]
+    resource_scope: own_tenant
+    confirmation_actions: []
+  operator:
+    allowed_tools: [documents.read, drafts.update]
+    resource_scope: own_tenant
+    confirmation_actions: [drafts.update]
