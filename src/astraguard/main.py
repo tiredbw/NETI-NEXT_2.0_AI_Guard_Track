@@ -193,7 +193,8 @@ def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, 
             decision, risk, reasons = "REVIEW", "unknown", ["CONTEXT_INCOMPLETE"]
         elif gate and gate[0] == "REVIEW" and decision == "ALLOW":
             decision, risk, reasons = "REVIEW", "medium", [gate[1]]
-        categories = result.categories if result else (["system_extraction"] if rule == "SYSTEM_EXTRACTION" else ["direct_injection"] if rule else [])
+        rule_category = {"SYSTEM_EXTRACTION": "system_extraction", "ROLE_SPOOFING": "role_spoofing"}.get(rule, "direct_injection")
+        categories = result.categories if result else ([rule_category] if rule else [])
         if hard_policy:
             categories = ["unauthorized_data" if gate[1] == "RESOURCE_NOT_FOUND_OR_HIDDEN" else "tool_misuse"]
         response = {
