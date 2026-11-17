@@ -59,6 +59,12 @@ def rule_signal(text: str, *, decode=True):
     action = re.search(r"прочитай|выдай|раскрой|\bread\b|\breveal\b|\bexecute\b", text)
     if wrapper and privilege and action:
         return "ROLE_SPOOFING"
+    access_request = re.match(r"^(?:прочитай|выдай|открой|read|retrieve|export)\b", text)
+    unverified_permission = re.search(
+        r"(?:устно|якобы)\s+(?:разрешил|одобрил)|(?:нет|без)\s+(?:серверных\s+)?(?:прав|разрешения)|"
+        r"verbal\s+(?:approval|permission)|without\s+(?:authorization|permission)", text)
+    if access_request and unverified_permission:
+        return "UNTRUSTED_ROLE_CLAIM"
     if decode and re.match(r"^(?:выполни|исполни|execute|follow)\b", text) and "base64" in text:
         budget = 4096
         for match in re.finditer(r"[A-Za-z0-9+/]{8,}={0,2}", original):
@@ -173,7 +179,7 @@ class OllamaDetector:
 
 
 def decide(rule, result: DetectorResult | None, failure: str | None):
-    if rule:
+    if rule and rule != "UNTRUSTED_ROLE_CLAIM":
         return "BLOCK", "critical" if rule == "SYSTEM_EXTRACTION" else "high", [rule]
     if failure or result is None:
         return "REVIEW", "unknown", ["DETECTOR_" + {
@@ -181,6 +187,8 @@ def decide(rule, result: DetectorResult | None, failure: str | None):
         }.get(failure, "UNAVAILABLE")]
     if result.intent == "attack" and result.severity in ("high", "critical"):
         return "BLOCK", result.severity, result.reason_codes
+    if rule == "UNTRUSTED_ROLE_CLAIM":
+        return "REVIEW", "medium", ["UNTRUSTED_ROLE_CLAIM"]
     if result.intent != "benign" or result.categories or result.severity not in ("none", "low"):
         return "REVIEW", "medium", ["AMBIGUOUS_INTENT"]
     return "ALLOW", "low", ["BENIGN_REQUEST"]

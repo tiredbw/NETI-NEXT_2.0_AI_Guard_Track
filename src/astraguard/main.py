@@ -167,6 +167,7 @@ def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, 
             raise HTTPException(429, "RATE_LIMIT")
         bucket.append(started)
         rule = rule_signal(body.text)
+        hard_rule = rule and rule != "UNTRUSTED_ROLE_CLAIM"
         rule_ms = (time.monotonic() - started) * 1000
         result, failure = None, None
         status = "skipped_hard_deny"
@@ -174,9 +175,9 @@ def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, 
         history = histories[str(body.session_id)]
         incomplete = len(history) >= 4 or sum(len(t) for t in history) + len(body.text) > 6000
         hard_policy = gate and gate[0] == "BLOCK"
-        if incomplete and not rule and not hard_policy:
+        if incomplete and not hard_rule and not hard_policy:
             status = "unavailable"
-        if not rule and not hard_policy and not incomplete:
+        if not hard_rule and not hard_policy and not incomplete:
             try:
                 context = json.dumps({"previous_allowed_turns": history, "current_text": body.text}, ensure_ascii=False) if history else body.text
                 result = await detector.analyze(context)
@@ -189,12 +190,15 @@ def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, 
         decision, risk, reasons = decide(rule, result, failure)
         if hard_policy:
             decision, risk, reasons = "BLOCK", "high", [gate[1]]
-        elif incomplete and not rule:
+        elif incomplete and not hard_rule:
             decision, risk, reasons = "REVIEW", "unknown", ["CONTEXT_INCOMPLETE"]
         elif gate and gate[0] == "REVIEW" and decision == "ALLOW":
             decision, risk, reasons = "REVIEW", "medium", [gate[1]]
-        rule_category = {"SYSTEM_EXTRACTION": "system_extraction", "ROLE_SPOOFING": "role_spoofing"}.get(rule, "direct_injection")
+        rule_category = {"SYSTEM_EXTRACTION": "system_extraction", "ROLE_SPOOFING": "role_spoofing",
+                         "UNTRUSTED_ROLE_CLAIM": "unauthorized_data"}.get(rule, "direct_injection")
         categories = result.categories if result else ([rule_category] if rule else [])
+        if rule and rule_category not in categories:
+            categories = [*categories, rule_category]
         if hard_policy:
             categories = ["unauthorized_data" if gate[1] == "RESOURCE_NOT_FOUND_OR_HIDDEN" else "tool_misuse"]
         response = {
@@ -217,6 +221,8 @@ def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, 
                 "TOOL_NOT_ALLOWED": "Этот инструмент или действие не разрешены вашей роли.",
                 "ACTION_REQUIRES_APPROVAL": "Действие остановлено: требуется подтверждение отдельного reviewer.",
             }[gate[1]]
+        if reasons == ["UNTRUSTED_ROLE_CLAIM"]:
+            response["explanation"] = "Запрос доступа ссылается на неподтверждённое разрешение. Заявление в тексте не предоставляет полномочий."
         if decision == "REVIEW" and reasons == ["ACTION_REQUIRES_APPROVAL"] and status == "ok":
             response["review"] = {"approvable": True, "expires_at": datetime.fromtimestamp(time.time() + 120, timezone.utc).isoformat()}
         await run_in_threadpool(store.save, principal, body.text, response)
