@@ -59,7 +59,7 @@ def main():
                         "ASTRAGUARD_DB_PATH": str(args.state_dir.resolve() / "audit.sqlite3")}
     print(f"AstraGuard: http://127.0.0.1:{args.port} ; API: /docs", flush=True)
     subprocess.run([sys.executable, "-m", "uvicorn", "astraguard.main:create_app", "--factory",
-                    "--app-dir", str(root / "src"), "--host", "127.0.0.1", "--port", str(args.port)],
+                    "--app-dir", str(root / "src"), "--host", "127.0.0.1", "--port", str(args.port), "--workers", "1"],
                    cwd=root, env=env, check=True)
 
 

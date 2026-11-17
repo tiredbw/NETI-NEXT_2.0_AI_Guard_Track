@@ -20,13 +20,14 @@ class AuditStore:
         os.chmod(path, 0o600)
         self.path, self.key, self.retention_days = path, key, retention_days
         with self.connect() as db:
-            if db.execute("PRAGMA user_version").fetchone()[0] > 3:
+            if db.execute("PRAGMA user_version").fetchone()[0] > 4:
                 raise ValueError("Unsupported database schema version")
             db.execute("PRAGMA journal_mode=WAL")
             db.execute("CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, subject TEXT, tenant TEXT, payload_hmac TEXT, result TEXT)")
             db.execute("CREATE TABLE IF NOT EXISTS policies (id TEXT, version INTEGER, config TEXT, PRIMARY KEY(id, version))")
             db.execute("CREATE TABLE IF NOT EXISTS active_policies (id TEXT PRIMARY KEY, version INTEGER NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS policy_metadata (id TEXT, version INTEGER, created_at TEXT, author TEXT, content_hash TEXT, PRIMARY KEY(id,version))")
+            db.execute("CREATE TABLE IF NOT EXISTS detector_operations (model TEXT PRIMARY KEY, operation_id TEXT NOT NULL, owner_pid INTEGER NOT NULL, digest TEXT, started_at TEXT NOT NULL)")
             db.execute("CREATE INDEX IF NOT EXISTS events_scope ON events(tenant,subject)")
             db.execute("CREATE TABLE IF NOT EXISTS resources (id TEXT PRIMARY KEY, tenant TEXT, kind TEXT, content TEXT)")
             if "version" not in [row[1] for row in db.execute("PRAGMA table_info(resources)")]:
@@ -39,7 +40,7 @@ class AuditStore:
                 ("A2", "A", "draft", "Синтетический черновик A."),
                 ("B2", "B", "draft", "Синтетический черновик B."),
             ])
-            db.execute("PRAGMA user_version=3")
+            db.execute("PRAGMA user_version=4")
         self.cleanup()
 
     @contextmanager
@@ -79,6 +80,25 @@ class AuditStore:
             db.execute("DELETE FROM events WHERE julianday(json_extract(result,'$.created_at')) < julianday(?)", (cutoff,))
             db.execute("DELETE FROM approvals WHERE expires < ?", (time.time(),))
             db.execute("DELETE FROM executions WHERE expires < ?", (time.time(),))
+
+    def detector_operation(self, model):
+        with self.connect() as db:
+            return db.execute("SELECT operation_id,owner_pid,digest,started_at FROM detector_operations WHERE model=?", (model,)).fetchone()
+
+    def claim_detector(self, model, operation_id, digest):
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM detector_operations WHERE model=?", (model,)).fetchone():
+                return False
+            db.execute("INSERT INTO detector_operations VALUES (?,?,?,?,?)", (model, operation_id, os.getpid(),
+                       digest, datetime.now(timezone.utc).isoformat()))
+        return True
+
+    def release_detector(self, model, operation_id):
+        with self.connect() as db:
+            cursor = db.execute("DELETE FROM detector_operations WHERE model=? AND operation_id=?",
+                                (model, operation_id))
+            return cursor.rowcount == 1
 
     def save(self, principal, text, result):
         with self.connect() as db:

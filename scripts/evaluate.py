@@ -100,6 +100,7 @@ def run_case(client, app, case, principal, token, repeat):
         record["technical_error"] = str(error) if isinstance(error, RuntimeError) else type(error).__name__
     record["detector_failed"] = any(any(code.startswith("DETECTOR_") for code in c.get("reason_codes", [])) for c in observed)
     record["detector_statuses"] = [c.get("detector", {}).get("status") for c in observed]
+    record["detector_digests"] = [c.get("detector", {}).get("digest") for c in observed]
     record["elapsed_ms"] = (time.perf_counter() - started) * 1000
     return record
 
@@ -153,6 +154,8 @@ def main():
     app = create_app(credentials=identities, db_path=output / "audit.sqlite3", hmac_key=secrets.token_bytes(32))
     rows = []
     with TestClient(app) as client, (output / "cases.jsonl").open("w") as stream:
+        metadata["startup_model"] = app.state.detector.health() if hasattr(app.state.detector, "health") else None
+        metadata["startup_detector"] = metadata["startup_model"]["status"] if metadata["startup_model"] else app.state.detector_status
         client.headers["Authorization"] = "Bearer " + warm_token
         session = client.post("/v1/sessions").json()["session_id"]
         warm_durations = []

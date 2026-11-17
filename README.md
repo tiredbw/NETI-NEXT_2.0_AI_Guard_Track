@@ -8,6 +8,8 @@
 
 ## Документы
 
+- [Startup модели, readiness и таймауты](docs/DETECTOR_LIFECYCLE.md)
+
 - [Управление политиками и retention аудита](docs/POLICY_OPERATIONS.md)
 
 - [Архитектура и модель угроз](docs/ARCHITECTURE.md)

@@ -40,6 +40,8 @@ def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, 
     store = AuditStore(Path(db_path or os.environ.get("ASTRAGUARD_DB_PATH", "data/audit.sqlite3")), key, retention_days)
     policy_service = PolicyService(store, Path(policy_path or "policies/strict-demo.yaml"))
     detector = detector or OllamaDetector()
+    if isinstance(detector, OllamaDetector):
+        detector.store = store
 
     @asynccontextmanager
     async def lifespan(app):
@@ -54,11 +56,15 @@ def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, 
                     logging.getLogger("astraguard").warning("Audit retention cleanup failed")
         task = asyncio.create_task(housekeeping())
         try:
+            if isinstance(detector, OllamaDetector):
+                await detector.startup()
             yield
         finally:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+            if isinstance(detector, OllamaDetector):
+                await detector.close()
 
     app = FastAPI(title="AstraGuard", version="0.1.0", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.store = store
@@ -141,10 +147,13 @@ def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, 
         with store.connect() as db:
             db.execute("SELECT 1")
         policy_service.snapshot()
-        ok = app.state.detector_status == "ok" and app.state.retention_status == "ok"
+        native = detector.health() if isinstance(detector, OllamaDetector) else None
+        status = native["status"] if native else app.state.detector_status
+        ok = (native["ready"] if native else status == "ok") and app.state.retention_status == "ok"
         return JSONResponse(status_code=200 if ok else 503, content={
             "status": "ready" if ok else "degraded", "database": "ok", "policy": "ok",
-            "detector": app.state.detector_status, "retention": app.state.retention_status})
+            "detector": status, "retention": app.state.retention_status,
+            "model": native})
 
     @app.get("/v1/me")
     def me(principal=Depends(identity)):
@@ -263,7 +272,7 @@ def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, 
             "explanation": {"ALLOW": "Обязательные проверки пройдены.", "BLOCK": "Обнаружена активная запрещённая инструкция.",
                             "REVIEW": "Запрос остановлен: требуется дополнительная проверка."}[decision],
             "policy_ids": [gate[1]] if gate and gate[0] != "ALLOW" else [], "policy_version": policy.version,
-            "detector": {"status": status, "model": "qwen3.5:4b", "digest": None},
+            "detector": {"status": status, "model": "qwen3.5:4b", "digest": getattr(detector, "digest", None)},
             "timing_ms": {"rules": rule_ms, "llm": (time.monotonic() - llm_started) * 1000,
                           "total": (time.monotonic() - started) * 1000},
             "review": {"approvable": False, "expires_at": None},
@@ -279,6 +288,10 @@ def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, 
         if reasons == ["POLICY_CHANGED"]:
             response["policy_ids"] = ["POLICY_CHANGED"]
             response["explanation"] = "Политика изменилась во время проверки. Запрос остановлен; повторите проверку."
+        if failure in ("quarantined", "draining"):
+            response["explanation"] = "Завершение предыдущей генерации не подтверждено. Запрос остановлен; модель не вызывается повторно."
+        elif failure == "model_changed":
+            response["explanation"] = "Digest локальной модели изменился. Запрос остановлен до проверки конфигурации."
         if decision == "REVIEW" and reasons == ["ACTION_REQUIRES_APPROVAL"] and status == "ok":
             response["review"] = {"approvable": True, "expires_at": datetime.fromtimestamp(time.time() + 120, timezone.utc).isoformat()}
         await run_in_threadpool(store.save, principal, body.text, response)

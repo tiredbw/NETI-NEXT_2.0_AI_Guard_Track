@@ -20,6 +20,8 @@
 
 Требуются dev dependencies (TestClient) и работающий локальный Ollama с `qwen3.5:4b`. Другие API не используются. Прогон создаёт отдельную SQLite БД и случайные credentials внутри процесса; конфигурация и данные UI-демо не затрагиваются. Артефакты — `data/eval/<UTC timestamp>/`, исключены из Git.
 
+Текущая версия также выполняет compatibility smoke в lifespan до входа в TestClient. Он исключён из качества/latency, затем выполняется отдельный warm-up измерителя. Metadata фиксирует startup model status; per-case records — наблюдаемые digest. Два self-test/warm-up запроса не являются тестовыми примерами корпуса.
+
 ## Что измеряется
 
 - 91 `gateway` scenario проходит через настоящий FastAPI `/v1/agent/turns`, Rule Engine, Qwen и policy gate. Сессии настоящие; ранее разрешённые turns накапливаются только сервером. При первом REVIEW/BLOCK сценарий останавливается. Единица multi-turn quality — вся сессия.

@@ -24,6 +24,18 @@ class FakeDetector:
         return DetectorResult(schema_version="1", intent="benign", categories=[], severity="none", reason_codes=["BENIGN_REQUEST"])
 
 
+def ollama_transport(handler, digest="d" * 64):
+    def route(request):
+        if request.url.path == "/api/version":
+            return httpx.Response(200, json={"version": "test"})
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": "qwen3.5:4b", "digest": digest}]})
+        if request.url.path == "/api/show":
+            return httpx.Response(200, json={"capabilities": ["completion", "thinking"]})
+        return handler(request)
+    return httpx.MockTransport(route)
+
+
 @pytest.fixture
 def setup(tmp_path):
     detector = FakeDetector()
@@ -122,7 +134,7 @@ def test_unsafe_policy(tmp_path, raw):
 @pytest.mark.parametrize("content", ["not json", "{}", json.dumps({"schema_version": "1", "intent": "benign", "categories": [],
     "severity": "none", "reason_codes": ["BENIGN_REQUEST"], "extra": "ALLOW"})])
 def test_invalid_model_output(content):
-    transport = httpx.MockTransport(lambda req: httpx.Response(200, json={"done": True, "message": {"content": content}}))
+    transport = ollama_transport(lambda req: httpx.Response(200, json={"done": True, "message": {"content": content}}))
     with pytest.raises(DetectorFailure) as exc:
         asyncio.run(OllamaDetector(transport).analyze("hello"))
     assert exc.value.status == "invalid_output"
@@ -136,7 +148,7 @@ def test_valid_model_transport():
         assert body["stream"] is False and isinstance(body["format"], dict)
         assert "tools" not in body
         return httpx.Response(200, json={"done": True, "message": {"content": payload}})
-    assert asyncio.run(OllamaDetector(httpx.MockTransport(handler)).analyze("hello")).intent == "benign"
+    assert asyncio.run(OllamaDetector(ollama_transport(handler)).analyze("hello")).intent == "benign"
 
 
 @pytest.mark.parametrize("intent,severity,expected", [("attack", "critical", "BLOCK"), ("attack", "low", "REVIEW"), ("ambiguous", "medium", "REVIEW")])
