@@ -6,6 +6,7 @@ import sqlite3
 import time
 from typing import Protocol
 from uuid import uuid4
+from datetime import datetime, timezone
 
 import httpx
 from pydantic import ValidationError
@@ -78,12 +79,19 @@ class OllamaDetector:
         self._thinking = False
         self._active = None
         self._closed = False
+        self._compatible = False
+        self._verified_at = None
+        self._checked_at = None
 
     def health(self):
-        return {"status": self.status, "ready": self.status == "ok" and not self._closed,
+        age = time.monotonic() - self._verified_at if self._verified_at is not None else None
+        fresh = age is not None and age <= 30
+        status = "stale" if self.status == "ok" and not fresh else self.status
+        return {"status": status, "ready": status == "ok" and not self._closed,
                 "model": MODEL, "digest": self.digest, "expected_digest": self.expected_digest,
                 "active": self._active is not None and not self._active.done(),
-                "last_error": self.last_error, **self.metadata}
+                "last_error": self.last_error, "checked_at": self._checked_at,
+                "verification_age_seconds": age, "verification_ttl_seconds": 30, **self.metadata}
 
     async def _json(self, client, method, path, payload=None, limit=65536):
         async with client.stream(method, "http://127.0.0.1:11434" + path, json=payload) as response:
@@ -123,6 +131,8 @@ class OllamaDetector:
                     details = model.get("details", {})
                     self.metadata = {"server_version": version["version"],
                                      "runner": details.get("runner"), "quantization": details.get("quantization_level")}
+                    self._verified_at = time.monotonic()
+                    self._checked_at = datetime.now(timezone.utc).isoformat()
         except DetectorFailure:
             raise
         except (TimeoutError, httpx.HTTPError, ValueError, KeyError, TypeError, StopIteration, AttributeError):
@@ -136,6 +146,21 @@ class OllamaDetector:
             await self.analyze("Добрый день. Объясни назначение защитного шлюза.")
         except DetectorFailure as error:
             self.last_error = error.status
+
+    async def refresh_metadata(self):
+        if self._closed or self.status in ("quarantined", "draining") or self._active and not self._active.done():
+            return
+        try:
+            await self._verify_metadata()
+            if self._compatible and self.status in ("ok", "unavailable", "model_changed", "timeout"):
+                self.status, self.last_error = "ok", None
+        except DetectorFailure as error:
+            self.status, self.last_error = error.status, error.status
+
+    async def monitor(self):
+        while True:
+            await asyncio.sleep(15)
+            await self.refresh_metadata()
 
     def _check_available(self):
         if self._closed:
@@ -224,6 +249,7 @@ class OllamaDetector:
                     raise DetectorFailure("context_overflow")
                 result = DetectorResult.model_validate_json(data["message"]["content"])
                 await self._verify_metadata()
+                self._compatible = True
                 outcome = "ok"
                 return result
         except (httpx.ConnectError, httpx.ConnectTimeout):

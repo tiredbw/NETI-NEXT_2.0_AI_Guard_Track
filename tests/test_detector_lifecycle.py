@@ -340,3 +340,48 @@ def test_connection_not_established_can_retry_safely(tmp_path):
         backend.handler = good
         assert (await detector.analyze("retry")).intent == "benign"
     asyncio.run(run())
+
+
+def test_metadata_monitor_detects_outage_without_new_generation(tmp_path):
+    async def run():
+        backend, store = Backend(), store_at(tmp_path)
+        detector = OllamaDetector(backend.transport, store=store)
+        await detector.startup()
+        assert detector.health()["ready"]
+        def offline(request):
+            raise httpx.ConnectError("offline")
+        detector.transport = httpx.MockTransport(offline)
+        await detector.refresh_metadata()
+        assert not detector.health()["ready"] and detector.status == "unavailable"
+        detector.transport = backend.transport
+        await detector.refresh_metadata()
+        assert detector.health()["ready"]
+        assert backend.posts == 1
+    asyncio.run(run())
+
+
+def test_readiness_expires_without_fresh_metadata(tmp_path):
+    async def run():
+        import time
+        backend = Backend()
+        detector = OllamaDetector(backend.transport, store=store_at(tmp_path))
+        await detector.startup()
+        detector._verified_at = time.monotonic() - 31
+        assert detector.health()["status"] == "stale"
+        assert not detector.health()["ready"]
+        await detector.refresh_metadata()
+        assert detector.health()["ready"] and backend.posts == 1
+    asyncio.run(run())
+
+
+def test_metadata_monitor_does_not_clear_quarantine(tmp_path):
+    async def run():
+        backend, store = Backend(), store_at(tmp_path)
+        store.claim_detector(MODEL, "unconfirmed-old-operation", "d" * 64)
+        detector = OllamaDetector(backend.transport, store=store)
+        await detector.startup()
+        before = backend.requests
+        await detector.refresh_metadata()
+        assert backend.requests == before
+        assert detector.status == "quarantined" and store.detector_operation(MODEL)
+    asyncio.run(run())

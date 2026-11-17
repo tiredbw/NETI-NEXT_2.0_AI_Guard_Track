@@ -55,19 +55,26 @@ def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, 
                     app.state.retention_status = "unavailable"
                     logging.getLogger("astraguard").warning("Audit retention cleanup failed")
         task = asyncio.create_task(housekeeping())
+        monitor = None
         try:
             if isinstance(detector, OllamaDetector):
                 await detector.startup()
+                monitor = asyncio.create_task(detector.monitor())
             yield
         finally:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+            if monitor:
+                monitor.cancel()
+                with suppress(asyncio.CancelledError):
+                    await monitor
             if isinstance(detector, OllamaDetector):
                 await detector.close()
 
     app = FastAPI(title="AstraGuard", version="0.1.0", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.store = store
+    app.state.detector = detector
     app.state.policies = policy_service
     app.state.retention_status = "ok"
     app.state.detector_status = "unavailable"

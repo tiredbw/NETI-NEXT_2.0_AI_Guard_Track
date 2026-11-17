@@ -97,3 +97,10 @@ def test_runner_keeps_setup_errors(setup):
     result = load_runner().run_case(client, app, case, Principal(subject_id="alice", tenant_id="A", role="viewer"), "wrong-credential", 0)
     assert result["decision"] is None
     assert result["technical_error"] == "SESSION_SETUP_FAILED"
+
+
+def test_evaluator_can_access_startup_detector_state(setup):
+    _, app, detector, _ = setup
+    assert app.state.detector is detector
+    startup = app.state.detector.health() if hasattr(app.state.detector, "health") else None
+    assert startup is None

@@ -21,6 +21,8 @@ Digest проверяется перед генерацией и после её
 
 ## Таймаут и незавершённая генерация
 
+Фоновый metadata monitor опрашивает локальный backend раз в 15 секунд без генераций. Health использует кеш с TTL 30 секунд и показывает checked_at/verification_age_seconds; просроченная успешная проверка становится stale/503. Обычный health GET сети не вызывает. После временного отказа metadata могут восстановить readiness только если structured compatibility уже была проверена. Monitor никогда не снимает quarantine/draining.
+
 Один активный inference, максимум четыре ожидающих запроса, queue timeout 2 с. Шестой запрос или истёкшая очередь →429. Бюджет ожидающего вызова после очереди — 20 с, включая metadata; запись аудита и HTTP gateway добавляют свою задержку.
 
 Важное отличие от простого wait_for HTTP:
@@ -64,7 +66,7 @@ MVP запускается с одним uvicorn worker (launcher задаёт �
 
 ## Фактические проверки
 
-- 134 offline pytest tests passed, одно известное предупреждение TestClient backend.
+- 138 offline pytest tests passed, одно известное предупреждение TestClient backend.
 - Fault-тесты с управляемым HTTP transport: публичный timeout, поздний done, отсутствие completion ack, обрыв, лимит drain, queue overflow, отмена caller, shutdown, смена digest до/во время генерации, отказ bookkeeping, сохранение карантина после рестарта и атомарное локальное восстановление.
 - На API подтверждено: timeout →REVIEW, поздний benign ответ не вызывает target agent; health становится ready только после завершения supervised задачи.
 - Реальный Ollama 0.40.16/MLX/nvfp4 прошёл startup; до пользовательского запроса health вернул 200 с digest 7f3251fa6878a78a606bcb3c074283306e5ad2ea411a7774a9dd98a4bc7f2d13.
