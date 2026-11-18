@@ -8,6 +8,8 @@
 
 ## Документы
 
+- [Проверки инструментов внешнего агента и tool/RAG-контента](docs/INTEGRATION.md)
+
 - [Startup модели, readiness и таймауты](docs/DETECTOR_LIFECYCLE.md)
 
 - [Управление политиками и retention аудита](docs/POLICY_OPERATIONS.md)
@@ -23,7 +25,7 @@
 ## Проверенное окружение
 
 - Рабочая директория: текущий корень проекта, без вложенного Git.
-- Git 2.56.0; gh 2.102.0; системный Python 3.14.8. Проект использует Python 3.12.15 в `.venv`; на текущей версии проходят 138 offline tests.
+- Git 2.56.0; gh 2.102.0; системный Python 3.14.8. Проект использует Python 3.12.15 в `.venv`; на текущей версии проходят 167 offline tests.
 - Локальный сервер Ollama 0.40.16 отвечает на `/api/version` и `/api/tags`.
 - Установлена `qwen3.5:4b`, digest `7f3251fa6878a78a606bcb3c074283306e5ad2ea411a7774a9dd98a4bc7f2d13`, размер файлов 3 973 305 013 байт, runner MLX, quantization `nvfp4` по ответу сервера. Размер файлов не равен потреблению RAM.
 - Apple M5 / 16 ГБ — сведения участника. Результаты реального инференса и latency предыдущих версий записаны в [EVALUATION.md](docs/EVALUATION.md), проверки startup и structured output — в [DETECTOR_LIFECYCLE.md](docs/DETECTOR_LIFECYCLE.md). Нового benchmark текущей версии пока нет.

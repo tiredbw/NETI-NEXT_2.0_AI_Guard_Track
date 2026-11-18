@@ -19,11 +19,12 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.concurrency import run_in_threadpool
 
 from .engines import DetectorFailure, OllamaDetector, Policy, decide, rule_signal
-from .schemas import CheckRequest, Principal, StrictModel, TurnRequest
+from .schemas import CheckRequest, ContentCheckRequest, Principal, StrictModel, ToolCheckRequest, TurnRequest
 from .storage import AuditStore
 from .demo import DemoAgent, plan
 from .approvals import ApprovalService
 from .policies import PolicyService, policy_etag
+from .integration import IntegrationChecks
 
 
 def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, policy_path=None, retention_days=None):
@@ -82,6 +83,7 @@ def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, 
     app.state.agent = agent
     approvals = ApprovalService(store, policy_service, agent)
     app.state.approvals = approvals
+    integration = IntegrationChecks(store, policy_service, detector)
     static_dir = Path(__file__).parent / "static"
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
@@ -214,6 +216,21 @@ def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, 
             raise HTTPException(403, "REVIEWER_REQUIRED")
         return store.statistics(principal)
 
+    def require_session(session_id, principal):
+        current = sessions.get(str(session_id))
+        if not current or current[0] != principal or current[1] < time.time():
+            raise HTTPException(404, "SESSION_NOT_FOUND")
+        return current[1]
+
+    def consume_rate(principal):
+        started = time.monotonic()
+        bucket = requests[(principal.tenant_id, principal.subject_id)]
+        while bucket and bucket[0] < started - 60:
+            bucket.popleft()
+        if len(bucket) >= 30:
+            raise HTTPException(429, "RATE_LIMIT")
+        bucket.append(started)
+
     async def evaluate(body, principal, gate=None):
         started = time.monotonic()
         policy = await run_in_threadpool(policy_service.snapshot)
@@ -221,17 +238,10 @@ def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, 
             raise HTTPException(413, "INPUT_TOO_LARGE")
         if not body.text.strip():
             raise HTTPException(422, "EMPTY_TEXT")
-        current = sessions.get(str(body.session_id))
-        if not current or current[0] != principal or current[1] < time.time():
-            raise HTTPException(404, "SESSION_NOT_FOUND")
+        require_session(body.session_id, principal)
         if body.policy_id != policy.id or principal.role not in policy.roles:
             raise HTTPException(403, "POLICY_NOT_ASSIGNED")
-        bucket = requests[(principal.tenant_id, principal.subject_id)]
-        while bucket and bucket[0] < started - 60:
-            bucket.popleft()
-        if len(bucket) >= 30:
-            raise HTTPException(429, "RATE_LIMIT")
-        bucket.append(started)
+        consume_rate(principal)
         rule = rule_signal(body.text)
         hard_rule = rule and rule != "UNTRUSTED_ROLE_CLAIM"
         rule_ms = (time.monotonic() - started) * 1000
@@ -307,6 +317,23 @@ def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, 
     @app.post("/v1/checks", status_code=201)
     async def check(body: CheckRequest, principal=Depends(identity)):
         return await evaluate(body, principal)
+
+    async def integration_check(body, principal):
+        expires = require_session(body.session_id, principal)
+        consume_rate(principal)
+        lock = session_locks[str(body.session_id)]
+        if lock.locked():
+            raise HTTPException(409, "SESSION_BUSY")
+        async with lock:
+            return await integration.check(principal, body, expires)
+
+    @app.post("/v1/tool-checks", status_code=201)
+    async def tool_check(body: ToolCheckRequest, principal=Depends(identity)):
+        return await integration_check(body, principal)
+
+    @app.post("/v1/content-checks", status_code=201)
+    async def content_check(body: ContentCheckRequest, principal=Depends(identity)):
+        return await integration_check(body, principal)
 
     @app.post("/v1/agent/turns")
     async def turn(body: TurnRequest, request: Request, principal=Depends(identity)):
