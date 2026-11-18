@@ -2,6 +2,10 @@
 
 Контракт P0, версия `/v1`. Все запросы JSON UTF-8, кроме статического UI и health. Даты UTC ISO8601, UUID v4. Поля неизвестной схемы запрещены. Bearer authentication; identity определяется сервером. Не принимать роль и tenant из body. HTTPS нужен при выходе за loopback.
 
+Lifecycle детектора реализован в [DETECTOR_LIFECYCLE.md](DETECTOR_LIFECYCLE.md). Runtime detector statuses дополнены draining/quarantined/model_changed; соответствующие серверные reason codes — DETECTOR_QUARANTINED и DETECTOR_MODEL_CHANGED. Они останавливают исполнение и не подтверждаются reviewer. Health содержит проверенные метаданные модели; сам health GET не запускает inference.
+
+Реализованное управление политиками и retention описано в [POLICY_OPERATIONS.md](POLICY_OPERATIONS.md). PUT принимает полный JSON с текущим base version и точным If-Match; сервер назначает version+1. Роль policy_admin задаётся только identities-конфигурацией и не входит в редактируемые policy roles. POLICY_CHANGED — серверное основание REVIEW при смене политики во время проверки.
+
 ## Маршруты
 
 | Метод и путь | Доступ | Результат |

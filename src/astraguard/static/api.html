@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AstraGuard — API</title><link rel="stylesheet" href="/static/app.css"></head>
+<body><header><a class="brand" href="/">AstraGuard<span>AI Security Gateway</span></a></header><main>
+<h1>API для локальной интеграции</h1>
+<p>Полная машиночитаемая схема: <a href="/openapi.json">OpenAPI JSON</a>. Все защищённые маршруты требуют заголовок Authorization: Bearer TOKEN. Ключ берётся из вашей локальной конфигурации; эта страница не выдаёт credentials.</p>
+<table><thead><tr><th>Маршрут</th><th>Назначение</th></tr></thead><tbody>
+<tr><td>POST /v1/sessions</td><td>Создать серверную сессию</td></tr>
+<tr><td>POST /v1/checks</td><td>Проверить без исполнения</td></tr>
+<tr><td>POST /v1/agent/turns</td><td>Проверить и передать агенту при ALLOW</td></tr>
+<tr><td>GET /v1/checks</td><td>История в пределах полномочий</td></tr>
+<tr><td>GET /v1/reviews/{id}</td><td>Описание точного действия для reviewer</td></tr>
+<tr><td>POST /v1/reviews/{id}/approve</td><td>Выдать одноразовое подтверждение</td></tr>
+<tr><td>GET /v1/stats</td><td>Статистика tenant для reviewer</td></tr>
+</tbody></table>
+<h2>Пример тела проверки</h2><pre>{
+  "text": "Объясни prompt injection",
+  "session_id": "UUID созданной сессии",
+  "policy_id": "strict-demo-v1"
+}</pre>
+<p>REVIEW и BLOCK останавливают передачу агенту. Для исполнения подтверждённого действия передайте approval_id и Idempotency-Key, сохранив исходные поля запроса. Ошибки имеют формат error.code, error.message и error.request_id.</p>
+<p>Эта справка работает без внешних CDN. Подробные контракты и ограничения находятся в docs/API.md и документах этапов в репозитории.</p>
+</main></body></html>
