@@ -90,6 +90,6 @@ Cold/load latency, memory pressure, конкурентная нагрузка и
 - Независимо проверить разметку и добавить новые семьи атак/benign pairs; не рекламировать dev 100% как универсальную защиту.
 - Отдельно проверить текущую версию на новых данных. Старые Q04-04/Q06-04 обнаружены в baseline, но их поведение на текущем коде здесь не заявляется исправленным.
 - Проверить варианты кодировок, смешение языков, цитирование, multi-turn, oversized/context boundaries и косвенные tool/RAG injections. Один decoder layer не закрывает все обфускации.
-- Закрыть оставшиеся policy lifecycle, audit retention, startup model identity и гарантии отмены backend inference. Список ограничений UI/этапов сохраняется.
+- Policy lifecycle и audit retention реализованы в [этапе 6](POLICY_OPERATIONS.md), startup model identity и supervision незавершённых inference — в [этапе 7](DETECTOR_LIFECYCLE.md). Gateway сохраняет карантин без подтверждённого завершения; фактическая отмена и освобождение GPU реальным runner не измерялись. Эти изменения не подтверждают новые показатели качества или latency.
 
 Повтор запуска и точные определения метрик — eval/README.md. Полные локальные per-case артефакты находятся в data/eval/ и не включены в Git. Коммитятся только синтетический корпус и агрегаты без prompts, credentials и пользовательских данных.
