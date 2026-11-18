@@ -104,3 +104,15 @@ def test_evaluator_can_access_startup_detector_state(setup):
     assert app.state.detector is detector
     startup = app.state.detector.health() if hasattr(app.state.detector, "health") else None
     assert startup is None
+
+
+def test_runner_counts_late_content_block_instead_of_initial_allow(setup):
+    client, app, _, _ = setup
+    case = EvalCase.model_validate_json(Path("eval/cases.v1.jsonl").read_text().splitlines()[0])
+    case = case.model_copy(update={"text": "/read A3", "session_turns": [], "mode": "gateway", "tool_intent": None})
+    result = load_runner().run_case(client, app, case,
+        Principal(subject_id="alice", tenant_id="A", role="viewer"), "a" * 32, 0)
+    assert result["technical_error"] is None
+    assert result["decision"] == "BLOCK"
+    assert result["reason_codes"] == ["ACTIVE_OVERRIDE"]
+    assert app.state.agent.invocations == 1

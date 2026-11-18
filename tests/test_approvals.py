@@ -43,6 +43,9 @@ def test_approval_write_and_retry(flow):
     assert first.json()["check"]["decision"] == "ALLOW"
     second = execute(client, body, approval)
     assert second.status_code == 200 and second.json()["execution"]["replayed"]
+    assert first.json()["execution"]["tool_invocations"] == 1
+    assert second.json()["execution"]["tool_invocations"] == 0
+    assert second.json()["execution"]["target_invocations"] == 0
     assert app.state.agent.invocations == 1
     with app.state.store.connect() as db:
         assert db.execute("SELECT content,version FROM resources WHERE id='A2'").fetchone() == ("synthetic-new", 2)

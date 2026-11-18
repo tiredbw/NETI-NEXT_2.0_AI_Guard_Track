@@ -6,6 +6,8 @@
 
 Lifecycle детектора реализован в [DETECTOR_LIFECYCLE.md](DETECTOR_LIFECYCLE.md). Runtime detector statuses дополнены draining/quarantined/model_changed; соответствующие серверные reason codes — DETECTOR_QUARANTINED и DETECTOR_MODEL_CHANGED. Они останавливают исполнение и не подтверждаются reviewer. Health содержит проверенные метаданные модели; сам health GET не запускает inference.
 
+Demo `/agent/turns` дополнен полями final_check и pipeline и выполняет content gate перед выдачей документа. Исходный check неизменяем; итоговый поздний отказ находится в final_check. Новый execution.status=output_blocked означает состоявшееся чтение с удержанным результатом; tool_invocations показывает реальные вызовы инструмента. Детали, HTTP-ошибки поздних этапов и поведение replay: [DEMO_PIPELINE.md](DEMO_PIPELINE.md).
+
 Реализованное управление политиками и retention описано в [POLICY_OPERATIONS.md](POLICY_OPERATIONS.md). PUT принимает полный JSON с текущим base version и точным If-Match; сервер назначает version+1. Роль policy_admin задаётся только identities-конфигурацией и не входит в редактируемые policy roles. POLICY_CHANGED — серверное основание REVIEW при смене политики во время проверки.
 
 ## Маршруты
