@@ -2,6 +2,8 @@
 
 Контракт P0, версия `/v1`. Все запросы JSON UTF-8, кроме статического UI и health. Даты UTC ISO8601, UUID v4. Поля неизвестной схемы запрещены. Bearer authentication; identity определяется сервером. Не принимать роль и tenant из body. HTTPS нужен при выходе за loopback.
 
+Реализованные внешние проверки инструментов и недоверенного контента описаны в [INTEGRATION.md](INTEGRATION.md). Для них MVP использует credential конкретного пользователя; общий service account и делегирование пока не реализованы. Остальные разделы этого документа включают целевой контракт P0; фильтры истории и произвольное окно статистики ещё не реализованы.
+
 Lifecycle детектора реализован в [DETECTOR_LIFECYCLE.md](DETECTOR_LIFECYCLE.md). Runtime detector statuses дополнены draining/quarantined/model_changed; соответствующие серверные reason codes — DETECTOR_QUARANTINED и DETECTOR_MODEL_CHANGED. Они останавливают исполнение и не подтверждаются reviewer. Health содержит проверенные метаданные модели; сам health GET не запускает inference.
 
 Реализованное управление политиками и retention описано в [POLICY_OPERATIONS.md](POLICY_OPERATIONS.md). PUT принимает полный JSON с текущим base version и точным If-Match; сервер назначает version+1. Роль policy_admin задаётся только identities-конфигурацией и не входит в редактируемые policy roles. POLICY_CHANGED — серверное основание REVIEW при смене политики во время проверки.
@@ -17,7 +19,8 @@ Lifecycle детектора реализован в [DETECTOR_LIFECYCLE.md](DET
 | POST `/v1/checks` | user | 201 сохранённая оценка; ничего не исполняет |
 | GET `/v1/checks/{id}` | owner или reviewer своего tenant | 200 результат, иначе 404 |
 | GET `/v1/checks?decision=&category=&limit=&cursor=` | owner; reviewer своего tenant | 200 `{items,next_cursor}`; limit 1..100, default 20 |
-| POST `/v1/tool-checks` | service adapter | 201 оценка конкретного typed tool intent; самостоятельно не исполняет |
+| POST `/v1/tool-checks` | adapter с credential пользователя | 201 оценка конкретного typed tool intent; самостоятельно не исполняет |
+| POST `/v1/content-checks` | adapter с credential пользователя | 201 оценка недоверенного tool/RAG-текста; не включает его в контекст |
 | POST `/v1/reviews/{check_id}/approve` | security_reviewer | 201 `{approval_id,expires_at}` только подтверждаемое действие |
 | POST `/v1/agent/turns` | user | 200 gate + execution; gateway сам проверяет и исполняет |
 | GET `/v1/policies` | user | 200 доступные profile ID/version и безопасное описание |
@@ -71,11 +74,11 @@ Reason codes серверные, enum: `BENIGN_REQUEST`, `BENIGN_SECURITY_EDUCAT
   "session_id": "c1454b44-ef8a-4daa-8dd5-a1fc1d853ca8",
   "parent_check_id": "fe2c147e-e7b3-4af8-aac9-9d236ced1835",
   "tool": "documents.read",
-  "arguments": {"document_id": "demo-own-001"}
+  "arguments": {"document_id": "A1"}
 }
 ```
 
-Adapter identity связана с исходным principal на сервере; пользователь не назначает себе service role. `parent_check_id` должен быть ALLOW и принадлежать той же сессии; это не заменяет новую policy check. Arguments — discriminated union из registry. Неизвестный инструмент даёт BLOCK с `TOOL_NOT_ALLOWED`, известный с неправильными args →422. Проверки чтения с безопасным аргументом могут ограничиться детерминированным ACL; свободный текст `drafts.update.content` проходит detector, повторно не использовать оценку другого текста.
+Adapter использует credential исходного principal; пользователь не назначает себе service role. `parent_check_id` должен быть исходным ALLOW того же владельца и сессии; это не заменяет новую policy check. Arguments валидируются схемой выбранного инструмента из registry. Неизвестный инструмент даёт BLOCK с `TOOL_NOT_ALLOWED`, известный с неправильными args →422. Чтение проходит детерминированный ACL; свободный текст `drafts.update.content` проходит detector, повторно не использовать оценку другого текста. Внешняя запись остаётся REVIEW и не подтверждается через demo approval workflow. Оба интеграционных маршрута возвращают `review.approvable=false` и `forwarded=false`.
 
 `POST /agent/turns`: те же поля, что `/checks`, плюс необязательный `approval_id`. На первом вызове выполняет оценку, сохраняет её и при ALLOW отправляет агенту. REVIEW/BLOCK → `forwarded:false`, `target_invocations:0`. При approval gateway извлекает исходный pending payload из RAM, требует совпадения session/text/policy/args, проверяет новую policy version и исполняет только подтверждённое действие. Если pending content утрачен —409, новая проверка. Ответ: `{check:<CheckResult>,execution:{status:"not_forwarded|completed|failed",forwarded:boolean,agent_invocation_id:null|uuid,target_invocations:integer,result:null|object}}`.
 
