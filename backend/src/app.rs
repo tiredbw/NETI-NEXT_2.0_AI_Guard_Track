@@ -418,7 +418,7 @@ async fn session_message(State(state): State<Arc<AppState>>, Path(id): Path<Stri
 
 /// GET /health: готовность модели и версия политики.
 async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
-    Json(json!({"status": "ok", "mode": std::env::var("GUARD_MODE").unwrap_or_else(|_| "gpu".into()), "model": state.detector.cfg.model, "policy_version": state.policy.load().version}))
+    Json(json!({"status": "ok", "mode": std::env::var("GUARD_MODE").unwrap_or_else(|_| "gpu".into()), "model": state.detector.cfg.model, "num_ctx": crate::detector::num_ctx(), "policy_version": state.policy.load().version}))
 }
 
 /// Собирает роутер со всеми маршрутами.

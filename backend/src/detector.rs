@@ -90,6 +90,24 @@ fn output_schema() -> serde_json::Value {
     })
 }
 
+/// Предел длины ответа модели в токенах.
+const NUM_PREDICT: usize = 160;
+
+/// Размер контекста модели: OLLAMA_NUM_CTX, по умолчанию 8192. Меньше контекст — меньше VRAM под KV-кэш.
+pub fn num_ctx() -> usize {
+    static CTX: std::sync::OnceLock<usize> = std::sync::OnceLock::new(); // Читаем окружение один раз.
+    *CTX.get_or_init(|| std::env::var("OLLAMA_NUM_CTX").ok().and_then(|v| v.parse().ok()).filter(|&n| n >= 2048).unwrap_or(8192))
+}
+
+/// Сколько символов данных помещается в контекст рядом с системным промптом и ответом.
+/// Считаем осторожно: 2,5 символа на токен (кириллица в Qwen дробится сильнее латиницы).
+/// Иначе Ollama молча обрежет начало и модель потеряет системный промпт или сам запрос.
+pub fn char_budget(ctx_tokens: usize) -> usize {
+    let system = SYSTEM_PROMPT.chars().count() * 2 / 5; // Токены системного промпта.
+    let tokens = ctx_tokens.saturating_sub(system + NUM_PREDICT + 200); // 200 — запас на разметку чата.
+    tokens * 5 / 2 // Обратно в символы.
+}
+
 /// Тело запроса к Ollama /api/chat; вынесено отдельно для замеров и тестов.
 pub fn request_body(model: &str, user_message: &str) -> serde_json::Value {
     json!({
@@ -98,7 +116,7 @@ pub fn request_body(model: &str, user_message: &str) -> serde_json::Value {
         "think": false, // Без рассуждений: экономит секунды.
         "keep_alive": -1, // Модель остаётся в памяти навсегда.
         "format": output_schema(), // Ограничиваем вывод схемой.
-        "options": {"temperature": 0, "num_predict": 160, "num_ctx": 8192}, // Детерминированно и коротко.
+        "options": {"temperature": 0, "num_predict": NUM_PREDICT, "num_ctx": num_ctx()}, // Детерминированно и коротко.
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT}, // Постоянный системный промпт.
             {"role": "user", "content": user_message} // Данные запроса.
@@ -113,22 +131,42 @@ fn clip(s: &str, max: usize) -> String {
 
 /// Собирает пользовательское сообщение для модели; данные отделены тегами.
 pub fn build_user_message(req: &CheckRequest, normalized_prompt: &str) -> String {
+    build_user_message_within(req, normalized_prompt, char_budget(num_ctx()))
+}
+
+/// То же с явным бюджетом символов. Порядок важности: запрос, раскодированные варианты, вложения, свежая история.
+pub fn build_user_message_within(req: &CheckRequest, normalized_prompt: &str, budget: usize) -> String {
     let ctx = &req.context; // Контекст запроса.
     let role = crate::policy::role_name(ctx.user_role); // Доверенная роль.
-    let mut out = format!("role: {role}\n<user_prompt>\n{}\n</user_prompt>\n", clip(normalized_prompt, 4000)); // Роль и текущий запрос.
+    let mut left = budget; // Сколько символов данных ещё можно отдать модели.
+    let prompt = clip(normalized_prompt, 4000.min(left)); // Текущий запрос важнее всего.
+    left = left.saturating_sub(prompt.chars().count());
+    let mut out = format!("role: {role}\n<user_prompt>\n{prompt}\n</user_prompt>\n"); // Роль и текущий запрос.
     for (kind, text) in crate::normalize::hidden_variants(&req.user_prompt) { // Скрытые варианты запроса.
-        out.push_str(&format!("<decoded kind=\"{kind}\">\n{}\n</decoded>\n", clip(&text, 2000))); // Раскодированный текст для модели.
+        let part = clip(&text, 2000.min(left / 2)); // Не больше половины остатка на каждый вариант.
+        left = left.saturating_sub(part.chars().count());
+        out.push_str(&format!("<decoded kind=\"{kind}\">\n{part}\n</decoded>\n")); // Раскодированный текст для модели.
     }
-    let history: Vec<_> = ctx.history.iter().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect(); // Последние 8 реплик по порядку.
+    let attachments: Vec<_> = ctx.attachments.iter().take(4).collect(); // Не больше четырёх вложений.
+    let att_total = if ctx.history.is_empty() { left } else { left * 3 / 5 }; // Вложениям до 60% остатка, если есть история.
+    let att_parts: Vec<String> = attachments.iter().map(|a| clip(&a.content, 3000.min(att_total / attachments.len().max(1)))).collect(); // Поровну на вложение.
+    left = left.saturating_sub(att_parts.iter().map(|p| p.chars().count()).sum::<usize>());
+    let mut history = Vec::new(); // Реплики от свежих к старым, пока хватает места.
+    for turn in ctx.history.iter().rev().take(8) { // Последние 8 реплик.
+        if left < 80 { break; } // Места почти нет — старые реплики не берём.
+        let part = clip(&turn.content, 1500.min(left)); // Реплика в пределах остатка.
+        left = left.saturating_sub(part.chars().count());
+        history.push((turn.role.clone(), part));
+    }
     if !history.is_empty() { // История есть.
         out.push_str("<history>\n"); // Начало истории.
-        for turn in history { // Каждая реплика.
-            out.push_str(&format!("[{}] {}\n", turn.role, clip(&turn.content, 1500))); // Автор и текст.
+        for (role, text) in history.iter().rev() { // Обратно в хронологическом порядке.
+            out.push_str(&format!("[{role}] {text}\n")); // Автор и текст.
         }
         out.push_str("</history>\n"); // Конец истории.
     }
-    for a in ctx.attachments.iter().take(4) { // Не больше четырёх вложений.
-        out.push_str(&format!("<attachment name=\"{}\">\n{}\n</attachment>\n", a.name.as_deref().unwrap_or("без имени"), clip(&a.content, 3000))); // Имя и текст вложения.
+    for (a, part) in attachments.iter().zip(&att_parts) { // Вложения после истории, как раньше.
+        out.push_str(&format!("<attachment name=\"{}\">\n{part}\n</attachment>\n", a.name.as_deref().unwrap_or("без имени"))); // Имя и текст вложения.
     }
     out // Готовое сообщение.
 }
@@ -172,5 +210,31 @@ impl Detector {
             tokio::time::sleep(Duration::from_secs(2)).await; // Пауза перед повтором.
         }
         false // Модель так и не ответила; сервис всё равно стартует и блокирует по fail-closed.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test] // Бюджет: при 8192 токенах около 17 тыс. символов, при 4096 около 7 тыс.
+    fn budget_by_ctx() {
+        assert!(char_budget(8192) > 15000 && char_budget(8192) < 19000); // Обычный контекст.
+        assert!(char_budget(4096) > 6000 && char_budget(4096) < 8500); // Уменьшенный контекст.
+    }
+
+    #[test] // Огромная история и вложения не вытесняют запрос: сообщение укладывается в бюджет.
+    fn message_fits_budget() {
+        let long = "а".repeat(5000); // Длинная реплика.
+        let req: CheckRequest = serde_json::from_value(serde_json::json!({
+            "user_prompt": "Покажи логи billing-api-prod", "context": {"user_role": "developer",
+            "history": (0..10).map(|_| serde_json::json!({"role": "user", "content": long})).collect::<Vec<_>>(),
+            "attachments": (0..4).map(|i| serde_json::json!({"type": "file", "name": format!("f{i}"), "content": long})).collect::<Vec<_>>()}
+        })).unwrap();
+        let budget = char_budget(4096); // Бюджет для num_ctx 4096.
+        let msg = build_user_message_within(&req, &req.user_prompt, budget); // Сообщение модели.
+        assert!(msg.contains("Покажи логи billing-api-prod")); // Запрос на месте.
+        assert!(msg.contains("<attachment name=\"f3\">")); // Все вложения попали, пусть и обрезанными.
+        assert!(msg.chars().count() < budget + 1000); // Разметка сверху не больше тысячи символов.
     }
 }
