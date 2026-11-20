@@ -1,19 +1,24 @@
-//! HTTP-слой: маршруты Axum, состояние приложения, перезагрузка политики.
+//! HTTP-слой: маршруты Axum по контракту docs/FRONTEND_PROMPT.md, состояние приложения, перезагрузка политики.
 
-use crate::contract::{CheckRequest, CheckResponse, Signal}; // Контракт /v1/check.
-use crate::detector::{build_user_message, Detector}; // Клиент Qwen.
-use crate::policy::Policy; // Политика.
-use crate::{decide, envdetect, normalize}; // Остальные модули.
-use arc_swap::ArcSwap; // Атомарная замена политики без блокировок.
-use axum::extract::{DefaultBodyLimit, State}; // Экстракторы Axum.
-use axum::http::{HeaderMap, StatusCode}; // Заголовки и коды ответа.
-use axum::response::{IntoResponse, Response}; // Ответы.
-use axum::routing::{get, post}; // Методы маршрутов.
-use axum::{Json, Router}; // JSON и роутер.
-use serde_json::json; // Сборка JSON-ответов.
-use std::path::PathBuf; // Путь к файлу политики.
-use std::sync::Arc; // Общее состояние между запросами.
-use std::time::Instant; // Замер задержки.
+use crate::contract::{
+    CheckRequest, CheckResponse, Confirmation, ConfirmRequest, Decision, FlaggedTurn, HistoryEffect, JournalEntry, PolicyVersionInfo,
+    Receipt, Role, Session, SessionLimits, Signal, SubmitResponse, Turn,
+};
+use crate::detector::{build_user_message, Detector};
+use crate::policy::Policy;
+use crate::store::{self, now_iso, unix_now, Pending, Store};
+use crate::{decide, envdetect, mask, normalize, web};
+use arc_swap::ArcSwap;
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
 
 /// Общее состояние сервиса.
 pub struct AppState {
@@ -21,145 +26,393 @@ pub struct AppState {
     pub policy_path: PathBuf, // Файл, из которого перечитываем политику.
     pub detector: Detector, // Клиент Ollama.
     pub admin_token: Option<String>, // Токен админа для изменения политики; None — изменение выключено.
+    pub store: Store, // Журнал, входящие агента, подтверждения, сессии, история политики.
+    pub frontend_dir: Option<PathBuf>, // Каталог фронтенда для раздачи со своего origin.
+    pub cors_origins: Vec<String>, // Origin отдельного dev-сервера фронта.
 }
 
-/// Ошибка в формате {"error": {"code", "message"}}.
-fn error(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
-    (status, Json(json!({"error": {"code": code, "message": message.into()}}))).into_response() // Единый формат ошибок.
+/// Ошибка в формате контракта: {"error": "<code>", "detail": "<текст>"}.
+pub fn error(status: StatusCode, code: &str, detail: impl Into<String>) -> Response {
+    (status, Json(json!({"error": code, "detail": detail.into()}))).into_response()
 }
 
-/// Проверяет заголовок X-Admin-Token.
-fn is_admin(state: &AppState, headers: &HeaderMap) -> bool {
-    match (&state.admin_token, headers.get("x-admin-token").and_then(|v| v.to_str().ok())) { // Токен сервера и токен запроса.
-        (Some(expected), Some(got)) => expected == got, // Совпадают — админ.
-        _ => false, // Иначе нет.
+fn store_error((status, code, detail): (u16, &str, &str)) -> Response {
+    error(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST), code, detail)
+}
+
+/// Проверка X-Admin-Token: 401 без токена, 403 при неверном или выключенном управлении.
+fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<(), Response> {
+    let got = headers.get("x-admin-token").and_then(|v| v.to_str().ok()).filter(|s| !s.is_empty());
+    match (&state.admin_token, got) {
+        (_, None) => Err(error(StatusCode::UNAUTHORIZED, "unauthorized", "Нужен заголовок X-Admin-Token")),
+        (None, Some(_)) => Err(error(StatusCode::FORBIDDEN, "forbidden", "Управление политикой выключено: ADMIN_TOKEN не задан")),
+        (Some(expected), Some(t)) if expected == t => Ok(()),
+        _ => Err(error(StatusCode::FORBIDDEN, "forbidden", "Токен не даёт права менять политику")),
     }
 }
 
-/// POST /v1/check: только оценка, ничего не исполняет и никуда не передаёт.
-async fn check(State(state): State<Arc<AppState>>, body: axum::body::Bytes) -> Response {
-    let started = Instant::now(); // Начало замера.
-    let raw: serde_json::Value = match serde_json::from_slice(&body) { // Сначала как произвольный JSON: нужен для request_hash.
-        Ok(v) => v, // Корректный JSON.
-        Err(e) => return error(StatusCode::BAD_REQUEST, "INVALID_INPUT", e.to_string()), // Не JSON.
-    };
+// ---------- оценка ----------
+
+/// Полная проверка: разбор, окружение, Qwen, политика. Ничего не исполняет и никуда не передаёт.
+async fn evaluate(state: &AppState, raw: Value) -> Result<(CheckResponse, CheckRequest), Response> {
+    let started = Instant::now();
     let request_hash = canonical_hash(&raw); // Хеш до любых преобразований.
-    let req: CheckRequest = match serde_json::from_value(raw) { // Затем строго по контракту.
-        Ok(r) => r, // Корректный запрос.
-        Err(e) => return error(StatusCode::BAD_REQUEST, "INVALID_INPUT", e.to_string()), // Нет обязательных полей.
-    };
-    let policy = state.policy.load_full(); // Снимок политики: версия в ответе совпадёт с проверкой.
-    let prompt = normalize::normalize(&req.user_prompt); // Нормализованный запрос.
-    let agent = policy.agent(); // Маски окружений из YAML.
-    let empty = Vec::new(); // Пустой список масок на случай их отсутствия.
-    let prod_masks = agent.environments.get("prod").unwrap_or(&empty); // Маски prod.
-    let nonprod_masks = agent.environments.get("nonprod").unwrap_or(&empty); // Маски nonprod.
-    let mut env_text = prompt.clone(); // Окружение ищем в запросе.
-    for turn in req.context.history.iter().filter(|t| t.role == "user").rev().take(2) { // И в двух последних репликах пользователя.
-        env_text.push(' '); // Разделитель.
-        env_text.push_str(&turn.content); // Текст реплики.
+    let req: CheckRequest = serde_json::from_value(raw).map_err(|e| error(StatusCode::BAD_REQUEST, "invalid_input", e.to_string()))?;
+    let policy = state.policy.load_full(); // Снимок: версия в ответе совпадёт с проверкой.
+    let prompt = normalize::normalize(&req.user_prompt);
+    let agent = policy.agent();
+    let empty = Vec::new();
+    let prod_masks = agent.environments.get("prod").unwrap_or(&empty);
+    let nonprod_masks = agent.environments.get("nonprod").unwrap_or(&empty);
+    let mut env_text = prompt.clone();
+    for turn in req.context.history.iter().filter(|t| t.role == "user").rev().take(2) {
+        env_text.push(' ');
+        env_text.push_str(&turn.content);
     }
-    for (_, hidden) in normalize::hidden_variants(&req.user_prompt) { // Окружение ищем и в раскодированных вариантах.
-        env_text.push(' '); // Разделитель.
-        env_text.push_str(&hidden); // Раскодированный текст.
+    for (_, hidden) in normalize::hidden_variants(&req.user_prompt) {
+        env_text.push(' ');
+        env_text.push_str(&hidden);
     }
-    let env = envdetect::detect(&env_text, prod_masks, nonprod_masks); // Детерминированное окружение (доли миллисекунды).
-    let message = build_user_message(&req, &prompt); // Сообщение для модели.
-    let det = state.detector.classify(&message).await; // Вызов Qwen; занимает почти всё время ответа.
-    let v = decide::decide(&policy, req.context.user_role, &env, det.as_ref().map_err(|e| *e)); // Сводим политику и модель.
-    let mut signals = Vec::new(); // Разбор по слоям для фронта.
-    match &det { // Что сказала модель.
-        Ok(d) => signals.push(Signal { source: "model".into(), label: format!("{:?}", d.category).to_lowercase(), detail: crate::mask::mask_secrets(&d.reason) }), // Категория и пояснение.
-        Err(e) => signals.push(Signal { source: "model".into(), label: "error".into(), detail: format!("{e:?}") }), // Сбой модели.
+    let env = envdetect::detect(&env_text, prod_masks, nonprod_masks);
+    let message = build_user_message(&req, &prompt);
+    let det = state.detector.classify(&message).await; // Почти всё время ответа.
+    let model_reason = det.as_ref().ok().map(|d| d.reason.clone()).unwrap_or_default(); // Пояснение самой модели для сигнала model.
+    let followup = crate::history::secret_followup(&req, &prompt); // Просьба выдать секреты, о которых шла речь раньше.
+    let det = det.map(|mut d| {
+        if let Some(word) = &followup {
+            if d.secrets != "values" { d.secrets = "values".into(); d.reason = format!("реплика ссылается на предыдущую о «{word}» и просит выдать содержимое"); }
+        }
+        d
+    });
+    let v = decide::decide(&policy, req.context.user_role, &env, det.as_ref().map_err(|e| *e));
+    let mut signals = Vec::new();
+    match &det {
+        Ok(d) => signals.push(Signal { source: "model".into(), label: crate::policy::category_name(d.category).into(), detail: mask::mask_secrets(&model_reason) }),
+        Err(e) => signals.push(Signal { source: "model".into(), label: "error".into(), detail: format!("{e:?}") }),
     }
-    signals.push(Signal { source: "policy".into(), label: format!("{:?}", v.decision).to_lowercase(), detail: v.policy_rule.clone().unwrap_or_else(|| "нет правила".into()) }); // Сработавшее правило.
-    if !env.evidence.is_empty() { signals.push(Signal { source: "rules".into(), label: "env".into(), detail: env.evidence.clone() }); } // Откуда окружение.
-    let mut explanation = v.explanation; // Объяснение.
-    if explanation.chars().count() > 1000 { explanation = explanation.chars().take(1000).collect(); } // Держим ответ далеко от 64 KiB.
+    signals.push(Signal { source: "policy".into(), label: format!("{:?}", v.decision).to_lowercase(), detail: v.policy_rule.clone().unwrap_or_else(|| "нет правила".into()) });
+    if !env.evidence.is_empty() { signals.push(Signal { source: "rules".into(), label: "env".into(), detail: env.evidence.clone() }); }
+    if !req.context.attachments.is_empty() { signals.push(Signal { source: "attachment".into(), label: "вложения".into(), detail: format!("{} шт. переданы детектору как данные", req.context.attachments.len()) }); }
+    if !req.context.history.is_empty() { signals.push(Signal { source: "history".into(), label: "история".into(), detail: format!("реплик передано детектору: {}", req.context.history.len()) }); }
+    if let Some(word) = &followup { signals.push(Signal { source: "history".into(), label: "ссылка на секреты".into(), detail: format!("текущая реплика продолжает разговор о «{word}» и просит выдать содержимое") }); }
+    let mut explanation = v.explanation;
+    if explanation.chars().count() > 1000 { explanation = explanation.chars().take(1000).collect(); } // Далеко от 64 KiB.
     let resp = CheckResponse {
-        decision: v.decision, risk_level: v.risk_level, risk_category: v.risk_category, explanation, // Основные поля.
-        latency_ms: (started.elapsed().as_secs_f64() * 1000.0 * 10.0).round() / 10.0, // Задержка с точностью 0.1 мс.
-        check_id: format!("chk_{}", uuid::Uuid::new_v4().simple()), // Идентификатор для журнала.
-        request_hash, // Хеш исходного запроса.
-        tool: v.tool, env: v.env, policy_rule: v.policy_rule, policy_version: policy.version.clone(), signals, // Наши поля.
+        decision: v.decision, risk_level: v.risk_level, risk_category: v.risk_category, explanation,
+        latency_ms: (started.elapsed().as_secs_f64() * 1000.0 * 10.0).round() / 10.0,
+        check_id: format!("chk_{}", uuid::Uuid::new_v4().simple()),
+        request_hash, tool: v.tool, env: v.env, policy_rule: v.policy_rule, policy_version: policy.version.clone(), signals,
     };
-    tracing::info!(check_id = %resp.check_id, decision = ?resp.decision, category = ?resp.risk_category, latency_ms = resp.latency_ms, "check"); // Журнал без текста запроса.
-    Json(resp).into_response() // HTTP 200.
+    tracing::info!(check_id = %resp.check_id, role = ?req.context.user_role, decision = ?resp.decision, category = ?resp.risk_category, latency_ms = resp.latency_ms, policy = %resp.policy_version, "check"); // Без текста запроса.
+    Ok((resp, req))
+}
+
+/// Пишет проверку в журнал: только маскированный текст.
+fn journal(state: &AppState, r: &CheckResponse, req: &CheckRequest, source: &str) {
+    state.store.journal_push(JournalEntry {
+        check_id: r.check_id.clone(), ts: now_iso(), user_id: req.context.user_id.clone(), user_role: req.context.user_role,
+        decision: r.decision, risk_level: r.risk_level, risk_category: r.risk_category, latency_ms: r.latency_ms,
+        policy_version: r.policy_version.clone(), prompt_masked: mask::mask_secrets(&req.user_prompt),
+        explanation: mask::mask_secrets(&r.explanation), source: source.into(),
+    });
 }
 
 /// sha256 от JSON {user_prompt, context} с отсортированными ключами и без пробелов, как JSON.stringify на фронте.
-pub fn canonical_hash(raw: &serde_json::Value) -> String {
-    use sha2::{Digest, Sha256}; // Хеш.
-    let subset = json!({"context": raw["context"], "user_prompt": raw["user_prompt"]}); // Только эти два поля.
-    let text = serde_json::to_string(&subset).unwrap_or_default(); // serde_json без preserve_order сортирует ключи и пишет без пробелов.
-    hex::encode(Sha256::digest(text.as_bytes())) // Hex-строка.
+pub fn canonical_hash(raw: &Value) -> String {
+    use sha2::{Digest, Sha256};
+    let subset = json!({"context": raw["context"], "user_prompt": raw["user_prompt"]});
+    let text = serde_json::to_string(&subset).unwrap_or_default(); // serde_json без preserve_order сортирует ключи.
+    hex::encode(Sha256::digest(text.as_bytes()))
 }
 
-/// GET /health: готовность модели и версия политики.
-async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    Json(json!({"status": "ok", "mode": std::env::var("GUARD_MODE").unwrap_or_else(|_| "gpu".into()), "model": state.detector.cfg.model, "policy_version": state.policy.load().version})) // Короткий статус.
+fn parse_body(body: &[u8]) -> Result<Value, Response> {
+    serde_json::from_slice(body).map_err(|e| error(StatusCode::BAD_REQUEST, "invalid_json", e.to_string()))
 }
 
-/// GET /v1/policy: действующая политика и её версия.
-async fn get_policy(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let p = state.policy.load(); // Текущий снимок.
-    Json(json!({"version": p.version, "yaml": p.raw})) // Версия и текст.
+/// POST /v1/check: только оценка.
+async fn check(State(state): State<Arc<AppState>>, body: axum::body::Bytes) -> Response {
+    let raw = match parse_body(&body) { Ok(v) => v, Err(e) => return e };
+    match evaluate(&state, raw).await {
+        Ok((r, req)) => { journal(&state, &r, &req, "check"); Json(r).into_response() }
+        Err(e) => e,
+    }
 }
 
-/// PUT /v1/policy: валидирует, сохраняет в файл и применяет новую политику (только админ).
-async fn put_policy(State(state): State<Arc<AppState>>, headers: HeaderMap, Json(body): Json<serde_json::Value>) -> Response {
-    if !is_admin(&state, &headers) { return error(StatusCode::FORBIDDEN, "FORBIDDEN", "нужен X-Admin-Token"); } // Только админ.
-    let Some(raw) = body["yaml"].as_str() else { return error(StatusCode::UNPROCESSABLE_ENTITY, "POLICY_INVALID", "нет поля yaml") }; // Текст обязателен.
-    let author = body["author"].as_str().unwrap_or("unknown"); // Автор изменения.
-    match Policy::parse(raw) { // Сначала валидация.
-        Ok(p) => {
-            if let Err(e) = std::fs::write(&state.policy_path, raw) { return error(StatusCode::INTERNAL_SERVER_ERROR, "POLICY_WRITE_FAILED", e.to_string()); } // Сохраняем на диск.
-            let version = p.version.clone(); // Новая версия.
-            state.policy.store(Arc::new(p)); // Атомарно применяем.
-            tracing::info!(%version, %author, "policy updated"); // Фиксируем автора и время в логе.
-            Json(json!({"version": version})).into_response() // Ответ с версией.
+// ---------- демо-передача агенту ----------
+
+/// Решение → передача заглушке агента, блокировка или ожидание подтверждения.
+fn route_to_agent(state: &AppState, check: CheckResponse, req: &CheckRequest, session_id: Option<String>) -> SubmitResponse {
+    let receipt = Receipt {
+        receipt_id: format!("rcp_{}", &uuid::Uuid::new_v4().simple().to_string()[..12]), check_id: check.check_id.clone(), received_at: now_iso(),
+        user_id: req.context.user_id.clone(), user_role: req.context.user_role, decision: check.decision, confirmed: false,
+        prompt_masked: mask::mask_secrets(&req.user_prompt),
+    };
+    match check.decision {
+        Decision::Allow => SubmitResponse { status: "forwarded".into(), receipt: Some(state.store.deliver(receipt)), confirmation: None, check },
+        Decision::Block => SubmitResponse { status: "blocked".into(), receipt: None, confirmation: None, check },
+        Decision::Confirm => {
+            let expires = unix_now() + store::CONFIRM_TTL_SECS;
+            let confirmation = Confirmation { check_id: check.check_id.clone(), request_hash: check.request_hash.clone(), user_id: req.context.user_id.clone(), expires_at: store::iso_from(expires, 0) };
+            state.store.pending_put(Pending { confirmation: confirmation.clone(), expires_unix: expires, used: false, receipt_base: receipt, session_id });
+            SubmitResponse { status: "pending_confirmation".into(), receipt: None, confirmation: Some(confirmation), check }
         }
-        Err(details) => (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error": {"code": "POLICY_INVALID", "details": details}}))).into_response(), // Ошибки валидации.
+    }
+}
+
+/// POST /v1/demo/submit: проверка и, при allow, передача заглушке агента.
+async fn demo_submit(State(state): State<Arc<AppState>>, body: axum::body::Bytes) -> Response {
+    let raw = match parse_body(&body) { Ok(v) => v, Err(e) => return e };
+    match evaluate(&state, raw).await {
+        Ok((r, req)) => { journal(&state, &r, &req, "demo"); Json(route_to_agent(&state, r, &req, None)).into_response() }
+        Err(e) => e,
+    }
+}
+
+/// POST /v1/demo/confirm: одноразовое подтверждение неизменного запроса его автором.
+async fn demo_confirm(State(state): State<Arc<AppState>>, Json(body): Json<ConfirmRequest>) -> Response {
+    let p = match state.store.pending_take(&body.check_id, &body.request_hash, body.user_id.as_deref()) { Ok(p) => p, Err(e) => return store_error(e) };
+    let receipt = state.store.deliver(Receipt { confirmed: true, received_at: now_iso(), ..p.receipt_base });
+    if let Some(sid) = p.session_id {
+        let text = format!("Агент получил подтверждённый запрос (квитанция {}).", receipt.receipt_id);
+        state.store.session_update(&sid, |s| {
+            let index = s.turns.len();
+            s.turns.push(Turn { index, role: "assistant".into(), content: text, ts: now_iso(), decision: None, check_id: None });
+        });
+    }
+    Json(json!({"status": "forwarded", "receipt": receipt})).into_response()
+}
+
+#[derive(Deserialize)]
+struct LimitQuery { limit: Option<usize> }
+
+/// GET /v1/agent/inbox: что реально получила заглушка агента.
+async fn agent_inbox(State(state): State<Arc<AppState>>, Query(q): Query<LimitQuery>) -> Json<Value> {
+    Json(json!({"items": state.store.inbox(q.limit.unwrap_or(50).min(500))}))
+}
+
+// ---------- журнал ----------
+
+#[derive(Deserialize)]
+struct JournalQuery { since: Option<String>, until: Option<String>, decision: Option<String>, category: Option<String>, role: Option<String>, limit: Option<usize>, offset: Option<usize> }
+
+/// GET /v1/journal: фильтры по времени, решению, категории и роли.
+async fn journal_list(State(state): State<Arc<AppState>>, Query(q): Query<JournalQuery>) -> Json<Value> {
+    let since = q.since.filter(|s| !s.is_empty());
+    let until = q.until.filter(|s| !s.is_empty());
+    let (items, total) = state.store.journal_query(|e| {
+        since.as_deref().is_none_or(|s| e.ts.as_str() >= s)
+            && until.as_deref().is_none_or(|u| e.ts.as_str() <= u)
+            && q.decision.as_deref().is_none_or(|d| d.is_empty() || json_name(&e.decision) == d)
+            && q.category.as_deref().is_none_or(|c| c.is_empty() || json_name(&e.risk_category) == c)
+            && q.role.as_deref().is_none_or(|r| r.is_empty() || json_name(&e.user_role) == r)
+    }, q.offset.unwrap_or(0), q.limit.unwrap_or(50).min(500));
+    Json(json!({"items": items, "total": total}))
+}
+
+/// Имя enum так, как оно выглядит в JSON (snake_case).
+fn json_name<T: serde::Serialize>(v: &T) -> String {
+    serde_json::to_value(v).ok().and_then(|x| x.as_str().map(str::to_owned)).unwrap_or_default()
+}
+
+// ---------- политика ----------
+
+/// GET /v1/policy: действующая политика, версия, автор и время.
+async fn get_policy(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let p = state.policy.load();
+    let meta = state.store.policy_current();
+    Json(json!({
+        "version": p.version, "yaml": p.raw,
+        "updated_at": meta.as_ref().map(|m| m.updated_at.clone()),
+        "updated_by": meta.as_ref().map(|m| m.updated_by.clone()),
+        "comment": meta.as_ref().map(|m| m.comment.clone()).unwrap_or_default(),
+    }))
+}
+
+/// GET /v1/policy/history: версии, новые сверху.
+async fn policy_history(State(state): State<Arc<AppState>>) -> Json<Value> {
+    Json(json!({"items": state.store.policy_history()}))
+}
+
+#[derive(Deserialize)]
+struct PolicyBody { yaml: Option<String>, comment: Option<String> }
+
+/// POST /v1/policy/validate: проверка без применения, доступна всем.
+async fn validate_policy(Json(body): Json<PolicyBody>) -> Json<Value> {
+    match Policy::parse(body.yaml.as_deref().unwrap_or("")) {
+        Ok(_) => Json(json!({"valid": true, "errors": []})),
+        Err(errors) => Json(json!({"valid": false, "errors": errors})),
+    }
+}
+
+/// PUT /v1/policy: валидирует, сохраняет в файл и применяет (только админ).
+async fn put_policy(State(state): State<Arc<AppState>>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+    if let Err(e) = require_admin(&state, &headers) { return e; } // Сначала права, потом разбор тела.
+    let body: PolicyBody = match serde_json::from_slice(&body) { Ok(b) => b, Err(e) => return error(StatusCode::BAD_REQUEST, "invalid_json", e.to_string()) };
+    let Some(raw) = body.yaml.as_deref() else { return error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_policy", "Нет поля yaml") };
+    match Policy::parse(raw) {
+        Ok(p) => {
+            if let Err(e) = std::fs::write(&state.policy_path, raw) { return error(StatusCode::INTERNAL_SERVER_ERROR, "policy_write_failed", e.to_string()); }
+            let info = PolicyVersionInfo { version: p.version.clone(), updated_at: now_iso(), updated_by: "policy-admin".into(), comment: body.comment.unwrap_or_default() };
+            state.policy.store(Arc::new(p));
+            state.store.policy_record(info.clone());
+            tracing::info!(version = %info.version, by = %info.updated_by, comment = %info.comment, "policy updated");
+            Json(json!({"version": info.version, "updated_at": info.updated_at, "updated_by": info.updated_by})).into_response()
+        }
+        Err(errors) => (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error": "invalid_policy", "detail": "Политика не прошла проверку", "errors": errors}))).into_response(),
     }
 }
 
 /// POST /v1/policy/reload: перечитывает файл политики с диска (только админ).
 async fn reload_policy(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if !is_admin(&state, &headers) { return error(StatusCode::FORBIDDEN, "FORBIDDEN", "нужен X-Admin-Token"); } // Только админ.
-    match reload_from_disk(&state) { // Перечитываем.
-        Ok(version) => Json(json!({"version": version})).into_response(), // Новая версия.
-        Err(details) => (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error": {"code": "POLICY_INVALID", "details": details}}))).into_response(), // Старая политика остаётся.
+    if let Err(e) = require_admin(&state, &headers) { return e; }
+    match reload_from_disk(&state) {
+        Ok(version) => Json(json!({"version": version})).into_response(),
+        Err(errors) => (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error": "invalid_policy", "detail": "Файл политики невалиден, действует прежняя версия", "errors": errors}))).into_response(),
     }
 }
 
-/// Читает файл политики и применяет его, если он валиден.
+/// Читает файл политики и применяет его, если он валиден и изменился.
 pub fn reload_from_disk(state: &AppState) -> Result<String, Vec<String>> {
-    let raw = std::fs::read_to_string(&state.policy_path).map_err(|e| vec![e.to_string()])?; // Текст файла.
-    let p = Policy::parse(&raw)?; // Валидация.
-    let version = p.version.clone(); // Версия.
-    if version != state.policy.load().version { // Файл действительно изменился.
-        state.policy.store(Arc::new(p)); // Применяем.
-        tracing::info!(%version, "policy reloaded"); // Пишем в лог.
+    let raw = std::fs::read_to_string(&state.policy_path).map_err(|e| vec![e.to_string()])?;
+    let p = Policy::parse(&raw)?;
+    let version = p.version.clone();
+    if version != state.policy.load().version {
+        state.policy.store(Arc::new(p));
+        state.store.policy_record(PolicyVersionInfo { version: version.clone(), updated_at: now_iso(), updated_by: "файл на диске".into(), comment: "изменение security_policy.yaml".into() });
+        tracing::info!(%version, "policy reloaded");
     }
-    Ok(version) // Возвращаем версию.
+    Ok(version)
+}
+
+// ---------- сессии ----------
+
+#[derive(Deserialize)]
+struct NewSession { user_id: String, #[serde(default)] user_name: String, user_role: Role, #[serde(default)] system_prompt: String }
+
+#[derive(Deserialize)]
+struct UserQuery { user_id: Option<String> }
+
+#[derive(Deserialize)]
+struct NewMessage { user_id: String, user_prompt: String, #[serde(default)] attachments: Vec<Value> }
+
+fn session_summary(s: &Session) -> Value {
+    let mut v = serde_json::to_value(s).unwrap_or_default();
+    if let Some(o) = v.as_object_mut() {
+        o.remove("turns");
+        o.insert("turn_count".into(), json!(s.turns.iter().filter(|t| t.role == "user").count()));
+    }
+    v
+}
+
+/// POST /v1/sessions.
+async fn session_create(State(state): State<Arc<AppState>>, Json(b): Json<NewSession>) -> Response {
+    if b.user_id.trim().is_empty() { return error(StatusCode::BAD_REQUEST, "invalid_input", "Нужен user_id"); }
+    let now = unix_now();
+    let expires = now + store::SESSION_TTL_MINUTES * 60;
+    let s = Session {
+        session_id: format!("ses_{}", &uuid::Uuid::new_v4().simple().to_string()[..12]), user_id: b.user_id, user_name: b.user_name, user_role: b.user_role,
+        system_prompt: b.system_prompt, created_at: now_iso(), expires_at: store::iso_from(expires, 0), expires_unix: expires,
+        limits: SessionLimits { max_turns: store::SESSION_MAX_TURNS, ttl_minutes: store::SESSION_TTL_MINUTES }, turns: Vec::new(),
+    };
+    state.store.session_put(s.clone());
+    Json(s).into_response()
+}
+
+/// GET /v1/sessions?user_id=: только свои сессии.
+async fn session_list(State(state): State<Arc<AppState>>, Query(q): Query<UserQuery>) -> Json<Value> {
+    let items: Vec<Value> = q.user_id.as_deref().map(|u| state.store.sessions_of(u).iter().map(session_summary).collect()).unwrap_or_default();
+    Json(json!({"items": items}))
+}
+
+/// GET /v1/sessions/{id}?user_id=.
+async fn session_get(State(state): State<Arc<AppState>>, Path(id): Path<String>, Query(q): Query<UserQuery>) -> Response {
+    match state.store.session_get(&id, q.user_id.as_deref().unwrap_or("")) { Ok(s) => Json(s).into_response(), Err(e) => store_error(e) }
+}
+
+/// DELETE /v1/sessions/{id}?user_id=.
+async fn session_delete(State(state): State<Arc<AppState>>, Path(id): Path<String>, Query(q): Query<UserQuery>) -> Response {
+    match state.store.session_delete(&id, q.user_id.as_deref().unwrap_or("")) { Ok(()) => Json(json!({"deleted": true})).into_response(), Err(e) => store_error(e) }
+}
+
+/// POST /v1/sessions/{id}/messages: история сессии становится context.history.
+async fn session_message(State(state): State<Arc<AppState>>, Path(id): Path<String>, Json(b): Json<NewMessage>) -> Response {
+    let s = match state.store.session_get(&id, &b.user_id) { Ok(s) => s, Err(e) => return store_error(e) };
+    let user_turns = s.turns.iter().filter(|t| t.role == "user").count();
+    if user_turns >= s.limits.max_turns { return error(StatusCode::CONFLICT, "session_full", format!("Лимит {} реплик исчерпан — очистите или создайте сессию", s.limits.max_turns)); }
+    let history: Vec<Value> = s.turns.iter().map(|t| json!({"role": t.role, "content": t.content})).collect();
+    let raw = json!({"user_prompt": b.user_prompt, "context": {
+        "target_agent": "it_ops_agent", "user_role": s.user_role, "user_id": s.user_id, "user_name": s.user_name,
+        "system_prompt": s.system_prompt, "history": history, "attachments": b.attachments,
+    }});
+    let (r, req) = match evaluate(&state, raw).await { Ok(x) => x, Err(e) => return e };
+    journal(&state, &r, &req, "session");
+    let flagged: Vec<FlaggedTurn> = s.turns.iter().filter(|t| t.role == "user" && t.decision == Some(Decision::Block)).map(|t| FlaggedTurn { turn: t.index, reason: "заблокирована ранее".into() }).collect();
+    let nums = flagged.iter().map(|f| format!("№{}", f.turn + 1)).collect::<Vec<_>>().join(", ");
+    let note = if s.turns.is_empty() {
+        "Это первая реплика сессии — истории нет.".to_string()
+    } else if !flagged.is_empty() && r.decision == Decision::Block {
+        format!("В истории есть заблокированные реплики ({nums}). Текущий запрос оценён вместе с ними и тоже заблокирован.")
+    } else if !flagged.is_empty() {
+        format!("В истории есть заблокированные реплики ({nums}): агенту они не передавались. Текущий запрос оценён вместе с историей и признан допустимым.")
+    } else {
+        format!("Детектор получил запрос вместе с историей (реплик: {}); решение учитывает весь диалог.", s.turns.len())
+    };
+    let effect = HistoryEffect { turns_considered: s.turns.len(), flagged, note };
+    let check_id = r.check_id.clone();
+    let decision = r.decision;
+    let sub = route_to_agent(&state, r, &req, Some(id.clone()));
+    let receipt_id = sub.receipt.as_ref().map(|x| x.receipt_id.clone());
+    state.store.session_update(&id, |s| {
+        let index = s.turns.len();
+        s.turns.push(Turn { index, role: "user".into(), content: b.user_prompt.clone(), ts: now_iso(), decision: Some(decision), check_id: Some(check_id) });
+        if let Some(rid) = receipt_id {
+            let index = s.turns.len();
+            s.turns.push(Turn { index, role: "assistant".into(), content: format!("Агент получил запрос (квитанция {rid})."), ts: now_iso(), decision: None, check_id: None });
+        }
+    });
+    let session = match state.store.session_get(&id, &b.user_id) { Ok(s) => s, Err(e) => return store_error(e) };
+    let mut v = serde_json::to_value(&sub).unwrap_or_default();
+    if let Some(o) = v.as_object_mut() {
+        o.insert("history_effect".into(), serde_json::to_value(&effect).unwrap_or_default());
+        o.insert("session".into(), serde_json::to_value(&session).unwrap_or_default());
+    }
+    Json(v).into_response()
+}
+
+// ---------- служебное ----------
+
+/// GET /health: готовность модели и версия политики.
+async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
+    Json(json!({"status": "ok", "mode": std::env::var("GUARD_MODE").unwrap_or_else(|_| "gpu".into()), "model": state.detector.cfg.model, "policy_version": state.policy.load().version}))
 }
 
 /// Собирает роутер со всеми маршрутами.
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/v1/check", post(check)) // Главный endpoint оценки.
-        .route("/health", get(health)) // Проверка живости.
-        .route("/v1/policy", get(get_policy).put(put_policy)) // Просмотр и изменение политики.
-        .route("/v1/policy/reload", post(reload_policy)) // Перезагрузка с диска.
+        .route("/v1/check", post(check))
+        .route("/health", get(health))
+        .route("/v1/demo/submit", post(demo_submit))
+        .route("/v1/demo/confirm", post(demo_confirm))
+        .route("/v1/agent/inbox", get(agent_inbox))
+        .route("/v1/journal", get(journal_list))
+        .route("/v1/policy", get(get_policy).put(put_policy))
+        .route("/v1/policy/validate", post(validate_policy))
+        .route("/v1/policy/history", get(policy_history))
+        .route("/v1/policy/reload", post(reload_policy))
+        .route("/v1/sessions", post(session_create).get(session_list))
+        .route("/v1/sessions/{id}", get(session_get).delete(session_delete))
+        .route("/v1/sessions/{id}/messages", post(session_message))
+        .fallback(web::static_files)
+        .layer(axum::middleware::from_fn_with_state(state.clone(), web::cors))
         .layer(DefaultBodyLimit::max(1024 * 1024)) // Тело не больше 1 MiB, как в starter_api.py.
-        .with_state(state) // Общее состояние.
+        .with_state(state)
 }
 
-#[cfg(test)] // Тесты HTTP-слоя.
+#[cfg(test)]
 mod tests {
     #[test] // request_hash совпадает с хешем, который считает фронт через JSON.stringify с сортировкой ключей.
     fn request_hash_matches_frontend() {
-        let raw = serde_json::json!({"user_prompt": "Перезапусти payments-api / \"prod\"", "context": {"user_role": "sre", "history": [{"role": "user", "content": "привет"}], "attachments": []}}); // Тот же запрос, что в проверке на node.
-        assert_eq!(super::canonical_hash(&raw), "1ae38b7290194dab576a4445048a7be2de0a07ad181c75e29e7369dc275edb22"); // Значение посчитано node-скриптом.
+        let raw = serde_json::json!({"user_prompt": "Перезапусти payments-api / \"prod\"", "context": {"user_role": "sre", "history": [{"role": "user", "content": "привет"}], "attachments": []}});
+        assert_eq!(super::canonical_hash(&raw), "1ae38b7290194dab576a4445048a7be2de0a07ad181c75e29e7369dc275edb22");
     }
 }
