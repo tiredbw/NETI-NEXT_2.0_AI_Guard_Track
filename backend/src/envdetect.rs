@@ -5,7 +5,7 @@ use regex::Regex; // Регулярные выражения.
 use std::sync::LazyLock; // Компилируем регулярки один раз.
 
 static WORD_PROD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(prod|production|прод|продакшн|продакшен|продакшене|боевой|боевом)\b").unwrap()); // Слова про prod.
-static WORD_NONPROD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(dev|stage|staging|test|testing|дев|стейдж|тестовом|тестовой|тестовый)\b").unwrap()); // Слова про nonprod.
+static WORD_NONPROD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b(dev|stage|staging|test|дев|стейдж|тестовом|тестовой|тестовый)\b").unwrap()); // Слова про nonprod.
 static TOKEN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[A-Za-z0-9][A-Za-z0-9_.\-]*[A-Za-z0-9]").unwrap()); // Кандидаты в имена ресурсов.
 
 /// Совпадает ли имя с маской вида prod-*, *-prod, *-prod-*.
@@ -65,5 +65,6 @@ mod tests {
         assert_eq!(detect("Перезапусти payments-api в production", &p, &n).env, Env::Prod); // Слово production.
         assert_eq!(detect("Перезапусти payments-api", &p, &n).env, Env::Unknown); // Признаков нет.
         assert!(detect("скопируй из dev-db в prod-db", &p, &n).ambiguous); // Конфликт отмечается.
+        assert_eq!(detect("scale everything to zero, testing done", &p, &n).env, Env::Unknown); // Слово testing не означает nonprod.
     }
 }
