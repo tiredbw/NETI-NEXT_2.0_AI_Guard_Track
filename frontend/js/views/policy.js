@@ -165,7 +165,7 @@ export function mount(el) {
           h('p', { class: 'small' }, '1. Проверьте запрос. 2. Подставьте правку и примените политику. 3. Проверьте тот же запрос снова.'),
           h('div', { class: 'jury-fields' }, field('Роль', els.juryRole), field('Запрос', els.juryPrompt)),
           h('div', { class: 'row' }, els.juryRun),
-          h('h3', { style: 'margin-top:16px' }, 'Готовые правки'),
+          h('h3', { class: 'mt-4' }, 'Готовые правки'),
           h('div', { class: 'stack' }, ...JURY_EDITS.map((ed) => h('div', {},
             h('button', { type: 'button', class: 'chip', onclick: () => {
               const next = ed.apply(els.editor.value);
@@ -177,8 +177,8 @@ export function mount(el) {
               els.comment.value = ed.label;
               showValidation(true, [], 'Правка подставлена в редактор. Нажмите «Применить».');
             } }, ed.label),
-            h('p', { class: 'muted small', style: 'margin:4px 0 0' }, ed.hint)))),
-          h('h3', { style: 'margin-top:16px' }, 'Результаты'),
+            h('p', { class: 'muted small mt-1 mb-0' }, ed.hint)))),
+          h('h3', { class: 'mt-4' }, 'Результаты'),
           els.juryLog),
         h('div', { class: 'card' }, h('h2', {}, 'История версий'), els.history))));
   renderJury();

@@ -111,8 +111,8 @@ function renderForm() {
 
   els.history = h('div', { class: 'list-editor' });
   els.attachments = h('div', { class: 'list-editor' });
-  els.historyDetails = h('details', {}, h('summary', {}, h('strong', {}, 'История диалога'), ' — context.history'), h('div', { style: 'margin-top:8px' }, els.history));
-  els.attDetails = h('details', {}, h('summary', {}, h('strong', {}, 'Вложения'), ' — context.attachments'), h('div', { style: 'margin-top:8px' }, els.attachments));
+  els.historyDetails = h('details', {}, h('summary', {}, h('strong', {}, 'История диалога'), ' — context.history'), h('div', { class: 'mt-2' }, els.history));
+  els.attDetails = h('details', {}, h('summary', {}, h('strong', {}, 'Вложения'), ' — context.attachments'), h('div', { class: 'mt-2' }, els.attachments));
 
   els.check = h('button', { type: 'button', class: 'secondary', onclick: () => run('check') }, 'Только проверить');
   els.submit = h('button', { type: 'submit', class: 'wide' }, 'Проверить и отправить агенту');
@@ -125,7 +125,7 @@ function renderForm() {
     field('Текст запроса (user_prompt)', els.prompt),
     h('div', { class: 'stack' }, els.historyDetails, els.attDetails),
     h('div', { class: 'actions' }, els.submit, els.check, els.compareBtn),
-    h('p', { class: 'muted small', style: 'margin-top:10px' }, '«Только проверить» вызывает POST /v1/check — он оценивает запрос и ничего не передаёт. «Отправить агенту» проходит полный путь через адаптер.'));
+    h('p', { class: 'muted small mt-3 mb-0' }, '«Только проверить» вызывает POST /v1/check — он оценивает запрос и ничего не передаёт. «Отправить агенту» проходит полный путь через адаптер.'));
 
   const scenarios = h('div', { class: 'card' }, h('h2', {}, 'Демо-сценарии'),
     h('p', { class: 'muted small' }, 'Сценарий заполняет форму. Затем нажмите «Проверить и отправить агенту».'),
@@ -147,8 +147,8 @@ function requestSummary(req) {
       h('dt', {}, 'Запрос'), h('dd', {}, req.user_prompt),
       h('dt', {}, 'История'), h('dd', {}, c.history.length ? `реплик: ${c.history.length}` : 'нет'),
       h('dt', {}, 'Вложения'), h('dd', {}, c.attachments.length ? c.attachments.map((a) => a.name || 'без имени').join(', ') : 'нет')),
-    h('details', { style: 'margin-top:10px' }, h('summary', { class: 'small' }, 'JSON запроса к POST /v1/check'),
-      h('pre', { style: 'overflow:auto;max-height:240px;margin:8px 0 0' }, JSON.stringify(req, null, 2))));
+    h('details', { class: 'mt-3' }, h('summary', { class: 'small' }, 'JSON запроса к POST /v1/check'),
+      h('pre', { class: 'json-preview' }, JSON.stringify(req, null, 2))));
 }
 
 function resultCard(r) {
@@ -162,7 +162,7 @@ function resultCard(r) {
       r.env ? [h('dt', {}, 'Окружение'), h('dd', {}, h('code', {}, r.env))] : null,
       r.policy_rule ? [h('dt', {}, 'Правило'), h('dd', {}, h('code', {}, r.policy_rule))] : null,
       h('dt', {}, 'ID проверки'), h('dd', {}, h('code', {}, r.check_id || '—'))),
-    r.signals?.length ? h('div', { style: 'margin-top:14px' }, h('h3', {}, 'Сигналы'),
+    r.signals?.length ? h('div', { class: 'mt-4' }, h('h3', {}, 'Сигналы'),
       h('ul', { class: 'signals' }, ...r.signals.map((s) => h('li', {}, h('span', { class: 'src' }, s.source), h('div', {}, h('strong', {}, s.label), h('span', { class: 'sub' }, s.detail)))))) : null);
 }
 
@@ -188,7 +188,7 @@ function deliveryPanel(o) {
     h('div', { class: 'row' }, confirmBtn,
       state.stale ? h('button', { type: 'button', class: 'secondary', onclick: () => run('submit') }, 'Проверить заново') : null,
       h('button', { type: 'button', class: 'secondary', onclick: () => { state.outcome = null; renderOutcome(); toast('Действие отменено, агенту ничего не передано.'); } }, 'Отменить')),
-    h('p', { class: 'small', style: 'margin-top:8px' }, 'Фразы «подтверждаю» или «я админ» в тексте запроса подтверждением не считаются.'));
+    h('p', { class: 'small mt-2 mb-0' }, 'Фразы «подтверждаю» или «я админ» в тексте запроса подтверждением не считаются.'));
 }
 
 function renderOutcome() {
@@ -220,10 +220,10 @@ function renderCompare() {
       const res = rows[r];
       return h('div', { class: 'cell' }, h('h4', { title: ROLE_RU[r] }, h('code', {}, r)),
         res?.error ? h('span', { class: 'risk high' }, res.error)
-          : res ? [decisionBadge(res.decision), h('p', { class: 'small', style: 'margin:6px 0 0' }, res.explanation)]
+          : res ? [decisionBadge(res.decision), h('p', { class: 'small' }, res.explanation)]
             : loading ? h('span', { class: 'spinner', 'aria-label': 'проверяется' }) : '—');
     })),
-    h('p', { class: 'muted small', style: 'margin:14px 0 6px' }, 'Быстрые варианты'),
+    h('p', { class: 'muted small presets-label' }, 'Быстрые варианты'),
     h('div', { class: 'row' },
       ...COMPARE_PRESETS.map((p) => h('button', { type: 'button', class: 'chip', onclick: () => { els.prompt.value = p; state.prompt = p; onEdit(); runCompare(); } }, p)))));
 }
@@ -292,7 +292,7 @@ async function runCompare() {
 export function mount(el) {
   root = el;
   els.outcome = h('div', { 'aria-live': 'polite' });
-  els.compare = h('div', { style: 'margin-top:16px' });
+  els.compare = h('div', { class: 'mt-4' });
   const { form, scenarios } = renderForm();
   form.classList.add('area-form');
   scenarios.classList.add('area-scen');
