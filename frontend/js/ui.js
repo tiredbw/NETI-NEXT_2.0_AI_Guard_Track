@@ -26,7 +26,9 @@ export function decisionBadge(decision, big = false) {
 }
 
 const RISK_RU = { none: 'нет', low: 'низкий', medium: 'средний', high: 'высокий', critical: 'критический' };
-export const riskBadge = (level) => h('span', { class: `risk ${level}` }, `${RISK_RU[level] || level} (${level})`);
+export const riskBadge = (level, compact = false) => (compact
+  ? h('span', { class: `risk ${level}`, title: level }, RISK_RU[level] || level)
+  : h('span', { class: `risk ${level}` }, `${RISK_RU[level] || level} (${level})`));
 
 export const ROLE_RU = { developer: 'developer — разработчик', sre: 'sre — SRE-инженер', admin: 'admin — администратор' };
 

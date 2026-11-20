@@ -59,7 +59,7 @@ function render() {
     h('td', {}, e.user_role),
     h('td', {}, decisionBadge(e.decision)),
     h('td', {}, h('code', {}, e.risk_category)),
-    h('td', {}, riskBadge(e.risk_level)),
+    h('td', { class: 'nowrap' }, riskBadge(e.risk_level, true)),
     h('td', { class: 'nowrap' }, fmtMs(e.latency_ms)),
     h('td', {}, h('code', {}, e.policy_version)),
     h('td', { class: 'prompt' }, e.prompt_masked)));
