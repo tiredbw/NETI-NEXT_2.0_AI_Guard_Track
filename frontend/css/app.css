@@ -96,6 +96,9 @@ main { max-width: 1240px; margin: 0 auto; padding: 20px; }
 .stack > * + * { margin-top: 14px; }
 .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .row.between { justify-content: space-between; }
+/* Кнопки формы: главная на всю ширину, две вторичные поровну под ней. */
+.actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 16px; }
+.actions > .wide { grid-column: 1 / -1; }
 .section-head { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
 .section-head h2 { margin: 0; }
 .check-grid { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); grid-template-areas: "form out" "scen out"; gap: 16px; align-items: start; }
@@ -134,8 +137,20 @@ select::-ms-expand { display: none; }
 input[type="datetime-local"] { font-variant-numeric: tabular-nums; padding-right: 8px; }
 input[type="datetime-local"]::-webkit-datetime-edit { padding: 0; line-height: 38px; }
 input[type="datetime-local"]::-webkit-calendar-picker-indicator { margin-left: 4px; cursor: pointer; }
-.filters { display: grid; grid-template-columns: repeat(2, minmax(220px, 1.3fr)) repeat(3, minmax(130px, 1fr)); gap: 10px 12px; }
-@media (max-width: 1100px) { .filters { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); } }
+/* Фильтры: в одну строку на широком экране, 2 даты + 3 списка на среднем, столбец на телефоне. */
+.filters { display: grid; grid-template-columns: repeat(2, minmax(200px, 1.3fr)) repeat(3, minmax(120px, 1fr)); gap: 0 12px; }
+@media (max-width: 1000px) {
+  .filters { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+  .filters > :nth-child(-n+2) { grid-column: span 3; }
+  .filters > :nth-child(n+3) { grid-column: span 2; }
+}
+@media (max-width: 640px) {
+  .filters { grid-template-columns: minmax(0, 1fr); }
+  .filters > :nth-child(n) { grid-column: auto; }
+}
+/* Подписи в строке полей — в одну строку, чтобы сами поля стояли на одной линии. */
+.inline-fields > .field > label, .filters > .field > label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.inline-fields { gap: 0 12px; }
 
 button {
   font: inherit; font-weight: 600; font-size: 14px; border-radius: 6px; padding: 8px 14px; cursor: pointer;
@@ -208,9 +223,13 @@ tr.details td { background: var(--surface-2); }
 td.prompt { max-width: 360px; overflow-wrap: anywhere; }
 td.nowrap { white-space: nowrap; }
 .empty-state { padding: 28px; text-align: center; color: var(--muted); }
+.empty-state p { margin: 0 auto; }
 
 /* Политика */
-.policy-meta { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 14px; margin-bottom: 12px; }
+.policy-meta { margin-bottom: 16px; }
+.field-note { margin: -4px 0 12px; }
+.jury-fields { display: grid; grid-template-columns: minmax(150px, 0.8fr) minmax(0, 2fr); gap: 0 12px; }
+@media (max-width: 1100px) { .jury-fields { grid-template-columns: minmax(0, 1fr); } }
 .errors { margin: 10px 0 0; padding-left: 18px; color: var(--block); font-size: 13px; }
 .ok-text { color: var(--allow); font-size: 13px; font-weight: 600; }
 .timeline { list-style: none; padding: 0; margin: 0; font-size: 13px; }

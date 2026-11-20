@@ -100,7 +100,7 @@ function applyScenario(s) {
 }
 
 function renderForm() {
-  els.user = select(DEMO_USERS.map((u) => [u.id, `${u.name} · ${u.id}`]), state.userId);
+  els.user = select(DEMO_USERS.map((u) => [u.id, u.name]), state.userId);
   els.user.addEventListener('change', () => { state.userId = els.user.value; state.role = userById(state.userId).role; syncIdentity(); onEdit(); });
   els.role = select(ROLES.map((r) => [r, ROLE_RU[r]]), state.role);
   els.role.addEventListener('change', () => { state.role = els.role.value; syncIdentity(); onEdit(); });
@@ -115,7 +115,7 @@ function renderForm() {
   els.attDetails = h('details', {}, h('summary', {}, h('strong', {}, 'Вложения'), ' — context.attachments'), h('div', { style: 'margin-top:8px' }, els.attachments));
 
   els.check = h('button', { type: 'button', class: 'secondary', onclick: () => run('check') }, 'Только проверить');
-  els.submit = h('button', { type: 'submit' }, 'Проверить и отправить агенту');
+  els.submit = h('button', { type: 'submit', class: 'wide' }, 'Проверить и отправить агенту');
   els.compareBtn = h('button', { type: 'button', class: 'secondary', onclick: runCompare }, 'Сравнить по ролям');
 
   const form = h('form', { class: 'card', onsubmit: (e) => { e.preventDefault(); run('submit'); } },
@@ -124,7 +124,7 @@ function renderForm() {
     els.roleNote,
     field('Текст запроса (user_prompt)', els.prompt),
     h('div', { class: 'stack' }, els.historyDetails, els.attDetails),
-    h('div', { class: 'row', style: 'margin-top:16px' }, els.submit, els.check, els.compareBtn),
+    h('div', { class: 'actions' }, els.submit, els.check, els.compareBtn),
     h('p', { class: 'muted small', style: 'margin-top:10px' }, '«Только проверить» вызывает POST /v1/check — он оценивает запрос и ничего не передаёт. «Отправить агенту» проходит полный путь через адаптер.'));
 
   const scenarios = h('div', { class: 'card' }, h('h2', {}, 'Демо-сценарии'),
