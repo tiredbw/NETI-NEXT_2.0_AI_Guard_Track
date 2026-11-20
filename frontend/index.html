@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ИИ-сторож — проверка запросов</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/app.css">
+  <script type="module" src="js/main.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand"><strong>ИИ-сторож</strong><span>Защитный шлюз для DevOps-агента it_ops_agent</span></div>
+      <div class="status" aria-live="polite">
+        <span id="mode-pill" class="pill">…</span>
+        <span class="pill"><span id="health-dot" class="dot"></span><span id="health-text">проверка сервиса</span></span>
+        <span class="pill" title="Версия действующей политики">политика <code id="policy-version">—</code></span>
+      </div>
+    </div>
+    <nav class="tabs" aria-label="Разделы">
+      <a href="#check">Проверка</a>
+      <a href="#agent">Агент</a>
+      <a href="#journal">Журнал</a>
+      <a href="#policy">Политика</a>
+      <a href="#sessions">Сессии</a>
+    </nav>
+  </header>
+  <main>
+    <div id="global-banner" class="banner" hidden></div>
+    <section id="view-check" data-view="check" hidden></section>
+    <section id="view-agent" data-view="agent" hidden></section>
+    <section id="view-journal" data-view="journal" hidden></section>
+    <section id="view-policy" data-view="policy" hidden></section>
+    <section id="view-sessions" data-view="sessions" hidden></section>
+  </main>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>
