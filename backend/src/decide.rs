@@ -68,7 +68,7 @@ pub fn decide(policy: &Policy, role: Role, env: &EnvGuess, det: Result<&Detector
         return mk(Decision::Block, RiskLevel::Medium, RiskCategory::UnauthorizedDataAccess, format!("Роли {r} запрещён доступ к секретам, даже к их именам."), format!("roles.{r}.secrets")); // Block.
     }
     // 4. Инструмент: сначала права роли, потом необходимость подтверждения.
-    if let Some(t) = tool.as_deref() { // Запрос требует инструмента.
+    if let Some(t) = tool.as_deref().filter(|_| det.action != "ask") { // Запрос требует выполнить инструмент (вопрос «как сделать» права не требует).
         let et = env_text(env); // Окружение для объяснения.
         return match policy.tool_perm(role, t, env.env) { // Матрица роль → инструмент → окружение.
             Perm::Deny => mk(Decision::Block, RiskLevel::High, RiskCategory::ToolAbuse, format!("Роль {r} не допускает {t} в окружении {et}."), format!("roles.{r}.tools.{t}")), // Нет прав.
@@ -96,7 +96,7 @@ mod tests {
         Policy::parse(include_str!("../../policies/security_policy.yaml")).unwrap() // Файл лежит в репозитории.
     }
     fn det(tool: Option<&str>) -> DetectorOut { // Ответ модели «легитимный запрос с инструментом».
-        DetectorOut { category: RiskCategory::SensitiveAction, risk_level: RiskLevel::Medium, tool: tool.map(Into::into), forbidden_action: None, secrets: "none".into(), reason: String::new() } // Без атак.
+        DetectorOut { category: RiskCategory::SensitiveAction, risk_level: RiskLevel::Medium, tool: tool.map(Into::into), action: "execute".into(), forbidden_action: None, secrets: "none".into(), reason: String::new() } // Без атак.
     }
     fn env(e: Env) -> EnvGuess { // Окружение без пояснения.
         EnvGuess { env: e, evidence: "тест".into(), ambiguous: false } // Явное окружение.
@@ -139,6 +139,16 @@ mod tests {
         let v = decide(&policy(), Role::Sre, &env(Env::Unknown), Ok(&det(Some("restart_service")))); // sre без окружения.
         assert_eq!(v.decision, Decision::Confirm); // Как в prod.
         assert!(v.explanation.contains("считаем prod")); // Объяснение говорит об этом.
+    }
+
+    #[test] // Вопрос «как сделать» не проверяется матрицей прав, а выполнение проверяется.
+    fn ask_skips_tool_policy() {
+        let mut d = det(Some("run_shell")); // Модель увидела инструмент.
+        d.action = "ask".into(); // Но это вопрос, а не просьба выполнить.
+        d.category = RiskCategory::None; // Без признаков атаки.
+        assert_eq!(decide(&policy(), Role::Developer, &env(Env::Unknown), Ok(&d)).decision, Decision::Allow); // Разрешено.
+        d.action = "execute".into(); // Теперь просят выполнить.
+        assert_eq!(decide(&policy(), Role::Developer, &env(Env::Unknown), Ok(&d)).decision, Decision::Block); // Права проверены: developer в prod нельзя.
     }
 
     #[test] // Сбой модели всегда даёт block.

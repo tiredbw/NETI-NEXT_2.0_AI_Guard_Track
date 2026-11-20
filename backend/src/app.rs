@@ -59,6 +59,10 @@ async fn check(State(state): State<Arc<AppState>>, body: axum::body::Bytes) -> R
         env_text.push(' '); // Разделитель.
         env_text.push_str(&turn.content); // Текст реплики.
     }
+    for (_, hidden) in normalize::hidden_variants(&req.user_prompt) { // Окружение ищем и в раскодированных вариантах.
+        env_text.push(' '); // Разделитель.
+        env_text.push_str(&hidden); // Раскодированный текст.
+    }
     let env = envdetect::detect(&env_text, prod_masks, nonprod_masks); // Детерминированное окружение (доли миллисекунды).
     let message = build_user_message(&req, &prompt); // Сообщение для модели.
     let det = state.detector.classify(&message).await; // Вызов Qwen; занимает почти всё время ответа.
