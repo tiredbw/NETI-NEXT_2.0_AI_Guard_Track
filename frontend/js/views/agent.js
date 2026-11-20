@@ -34,7 +34,7 @@ function render(items) {
       h('td', {}, r.user_role),
       h('td', {}, decisionBadge(r.decision)),
       h('td', {}, r.confirmed ? 'подтверждено пользователем' : 'не требовалось'),
-      h('td', { class: 'prompt' }, r.prompt_masked)))))));
+      h('td', { class: 'prompt' }, h('div', { class: 'clamp-2', title: r.prompt_masked }, r.prompt_masked))))))));
 }
 
 export function mount(el) {

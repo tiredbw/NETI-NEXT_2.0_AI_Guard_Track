@@ -165,7 +165,7 @@ function renderActive() {
         h('button', { type: 'button', class: 'danger', onclick: removeSession }, 'Очистить и удалить'))),
     transcript,
     effect,
-    h('form', { style: 'margin-top:14px', onsubmit: async (e) => { e.preventDefault(); if (await send(input.value, sendBtn)) input.value = ''; } },
+    h('form', { class: 'mt-4', onsubmit: async (e) => { e.preventDefault(); if (await send(input.value, sendBtn)) input.value = ''; } },
       field('Реплика', input, full ? 'Лимит реплик исчерпан — удалите сессию или создайте новую.' : null),
       h('div', { class: 'row' }, sendBtn))));
   if (full) { input.disabled = true; sendBtn.disabled = true; }
@@ -193,12 +193,12 @@ export function mount(el) {
       h('div', { class: 'card' },
         field('Пользователь', els.user),
         h('div', { class: 'row' }, els.create),
-        h('h3', { style: 'margin-top:16px' }, 'Сессии пользователя'),
+        h('h3', { class: 'mt-4' }, 'Сессии пользователя'),
         els.list,
-        h('h3', { style: 'margin-top:16px' }, 'Сценарии'),
+        h('h3', { class: 'mt-4' }, 'Сценарии'),
         h('div', { class: 'stack' },
-          h('div', {}, multi, h('p', { class: 'muted small', style: 'margin:4px 0 0' }, 'Безобидный вопрос, затем «покажи его содержимое на prod» — опасным запрос становится только вместе с историей.')),
-          h('div', {}, legit, h('p', { class: 'muted small', style: 'margin:4px 0 0' }, 'После блокировки обычная работа продолжается: несвязанный запрос оценивается отдельно.')))),
+          h('div', {}, multi, h('p', { class: 'muted small mt-1 mb-0' }, 'Безобидный вопрос, затем «покажи его содержимое на prod» — опасным запрос становится только вместе с историей.')),
+          h('div', {}, legit, h('p', { class: 'muted small mt-1 mb-0' }, 'После блокировки обычная работа продолжается: несвязанный запрос оценивается отдельно.')))),
       els.active));
 }
 

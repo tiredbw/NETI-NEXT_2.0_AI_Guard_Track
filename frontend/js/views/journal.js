@@ -62,10 +62,11 @@ function render() {
     h('td', { class: 'nowrap' }, riskBadge(e.risk_level, true)),
     h('td', { class: 'nowrap' }, fmtMs(e.latency_ms)),
     h('td', {}, h('code', {}, e.policy_version)),
-    h('td', { class: 'prompt' }, e.prompt_masked)));
+    h('td', { class: 'prompt' }, h('div', { class: 'clamp-2', title: e.prompt_masked }, e.prompt_masked))));
     if (isOpen) {
       rows.push(h('tr', { class: 'details' }, h('td', { colspan: 9 },
         h('dl', { class: 'kv' },
+          h('dt', {}, 'Запрос'), h('dd', {}, e.prompt_masked),
           h('dt', {}, 'Объяснение'), h('dd', {}, e.explanation || '—'),
           h('dt', {}, 'ID проверки'), h('dd', {}, h('code', {}, e.check_id)),
           h('dt', {}, 'Источник'), h('dd', {}, { check: 'POST /v1/check', demo: 'демо-отправка агенту', session: 'сессия' }[e.source] || e.source || '—')))));
@@ -105,12 +106,12 @@ export function mount(el) {
   el.append(
     h('div', { class: 'section-head' }, h('h2', {}, 'Журнал проверок'), els.count),
     h('p', { class: 'muted' }, 'Каждая проверка: время, пользователь, роль, решение, категория, риск, задержка и версия политики. Секреты в тексте запроса маскируются до записи. Нажмите на строку, чтобы увидеть объяснение.'),
-    h('form', { class: 'card', style: 'margin-bottom:16px', onsubmit: (e) => { e.preventDefault(); load(); } },
+    h('form', { class: 'card mb-4', onsubmit: (e) => { e.preventDefault(); load(); } },
       h('div', { class: 'filters' },
         field('С', els.since), field('По', els.until), field('Решение', els.decision), field('Категория', els.category), field('Роль', els.role)),
       h('div', { class: 'row' }, els.apply, els.reset, els.lastHour)),
     els.body,
-    h('div', { class: 'row', style: 'margin-top:12px' }, els.more));
+    h('div', { class: 'row mt-3' }, els.more));
 }
 
 export function show() { load(); }
