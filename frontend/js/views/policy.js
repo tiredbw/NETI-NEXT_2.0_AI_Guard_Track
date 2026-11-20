@@ -1,12 +1,11 @@
 // Вкладка «Политика»: действующий YAML, версия, валидация и применение с админ-токеном.
 
-import { api, errorText, mockAdminToken, ApiError, isAuthError, setAdminToken, getAdminToken } from '../api.js';
+import { api, errorText, mockAdminToken, ApiError, isAuthError, setAdminToken, getAdminToken, hasUserToken, authMessage } from '../api.js';
 import { h, clear, tokenGate, decisionBadge, fmtTime, busy, field, select, toast, emit, ROLE_RU } from '../ui.js';
 import { DEMO_USERS, ROLES, buildContext } from '../data.js';
 
 let els = {};
 let current = null;
-let adminToken = '';           // только в памяти вкладки
 const juryLog = [];
 
 const JURY_EDITS = [
@@ -38,7 +37,7 @@ async function loadPolicy() {
     emit('policy', current.version);
   } catch (e) {
     if (isAuthError(e)) {
-      clear(els.meta).append(h('div', { class: 'banner error' }, errorText(e)), tokenGate((t) => { setAdminToken(t); els.token.value = t; loadPolicy(); }, 'Политика открывается с токеном администратора (просмотр и изменение) или аудитора (только просмотр).'));
+      clear(els.meta).append(h('div', { class: 'banner error' }, authMessage(e)), tokenGate((t) => setAdminToken(t), 'Политика открывается с токеном администратора (просмотр и изменение) или аудитора (только просмотр).'));
       clear(els.history);
       return;
     }
@@ -85,12 +84,13 @@ async function validate() {
 }
 
 async function applyPolicy() {
-  adminToken = els.token.value.trim() || getAdminToken();
-  if (adminToken) setAdminToken(adminToken); // Тот же токен открывает журнал и входящие агента.
+  const typed = els.token.value.trim();
+  const adminToken = typed || getAdminToken();
   if (!adminToken) { els.token.focus(); showValidation(false, ['Для применения нужен админ-токен. Изменять политику может только администратор политики.']); return; }
   busy(els.apply, true, 'Применяем…');
   try {
     const r = await api('PUT', '/v1/policy', { yaml: els.editor.value, comment: els.comment.value.trim() }, { 'X-Admin-Token': adminToken });
+    if (typed) { setAdminToken(typed); els.token.value = ''; } // Принятый токен становится общим для вкладок.
     delete els.editor.dataset.dirty;
     els.comment.value = '';
     showValidation(true, [], `Применена версия ${r.version}. Автор: ${r.updated_by}, ${fmtTime(r.updated_at, true)}. Новые проверки уже идут по ней.`);
@@ -190,4 +190,8 @@ export function mount(el) {
   renderJury();
 }
 
-export function show() { loadPolicy(); }
+export function show() {
+  // Поле токена подсказывает, что общий токен уже введён в другой вкладке.
+  els.token.placeholder = hasUserToken() ? 'используется введённый токен' : 'X-Admin-Token';
+  loadPolicy();
+}

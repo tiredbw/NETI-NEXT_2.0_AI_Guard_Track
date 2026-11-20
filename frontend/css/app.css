@@ -163,6 +163,11 @@ code, pre, .mono { font-family: var(--mono); font-size: var(--fs-sm); }
 .pill code { line-height: 20px; }
 .pill.mock { background: var(--warn-bg); color: var(--warn); border-color: transparent; font-weight: var(--fw-semibold); }
 .pill.api { background: var(--info-bg); color: var(--info); border-color: transparent; font-weight: var(--fw-semibold); }
+button.pill.token-pill {
+  font-size: inherit; font-weight: var(--fw-semibold); min-height: 0; line-height: 20px; padding: var(--sp-1) var(--sp-3);
+  background: var(--accent-soft); color: var(--accent); border: 1px solid transparent; border-radius: var(--r-pill);
+}
+button.pill.token-pill:hover:not(:disabled) { background: var(--surface-hover); color: var(--ink); border-color: var(--line-strong); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line-strong); }
 .dot.ok { background: var(--allow); }
 .dot.bad { background: var(--block); }

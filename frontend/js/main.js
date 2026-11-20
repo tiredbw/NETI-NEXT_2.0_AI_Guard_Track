@@ -1,7 +1,7 @@
 // Точка входа: режим (API или мок), здоровье сервиса и переключение вкладок.
 
-import { api, isMock, apiOrigin, errorText } from './api.js';
-import { on } from './ui.js';
+import { api, isMock, apiOrigin, errorText, hasUserToken, clearAdminToken, onTokenChange } from './api.js';
+import { on, toast } from './ui.js';
 import * as check from './views/check.js';
 import * as agent from './views/agent.js';
 import * as journal from './views/journal.js';
@@ -67,6 +67,12 @@ function init() {
     pill.className = 'pill api';
     pill.textContent = `API: ${apiOrigin().replace(/^https?:\/\//, '')}`;
   }
+  const tokenPill = document.getElementById('token-pill');
+  const syncToken = () => { tokenPill.hidden = !hasUserToken(); };
+  tokenPill.addEventListener('click', () => { clearAdminToken(); toast('Токен сброшен: журнал, входящие агента и политика снова закрыты.'); });
+  // Закрытые разделы перерисовываются с новым доступом; при отказе вкладка уже показывает форму сама.
+  onTokenChange(({ reason }) => { syncToken(); if (reason !== 'rejected') route(); });
+  syncToken();
   on('policy', setVersion);
   on('checked', (r) => r?.policy_version && setVersion(r.policy_version));
   window.addEventListener('hashchange', route);
