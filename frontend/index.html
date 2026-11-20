@@ -4,14 +4,21 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ИИ-сторож — проверка запросов</title>
-  <link rel="icon" href="data:,">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="css/app.css">
   <script type="module" src="js/main.js"></script>
 </head>
 <body>
   <header class="topbar">
     <div class="topbar-inner">
-      <div class="brand"><strong>ИИ-сторож</strong><span>Защитный шлюз для DevOps-агента it_ops_agent</span></div>
+      <div class="brand">
+        <a class="brand-link" href="#check">
+          <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path class="shield" d="M16 2.5 5 6.6v8.2c0 6.9 4.6 12.6 11 14.7 6.4-2.1 11-7.8 11-14.7V6.6L16 2.5z"/><path class="tick" d="m11 16.2 3.4 3.4 6.6-6.8"/></svg>
+          <span class="brand-text"><strong>ИИ-сторож</strong><span>Защитный шлюз для DevOps-агента it_ops_agent</span></span>
+        </a>
+        <span class="brand-sep hide-md" aria-hidden="true"></span>
+        <a class="case-by hide-md" href="https://astra.ru" target="_blank" rel="noopener noreferrer" title="Кейс «Группы Астра»"><span>кейс</span><picture><source srcset="assets/astra-logo-on-dark.svg" media="(prefers-color-scheme: dark)"><img src="assets/astra-logo.svg" alt="Группа Астра" width="75" height="20"></picture></a>
+      </div>
       <div class="status" aria-live="polite">
         <span id="mode-pill" class="pill">…</span>
         <span class="pill"><span id="health-dot" class="dot"></span><span id="health-text">проверка сервиса</span><span id="health-model" class="hide-sm"></span></span>
@@ -34,6 +41,13 @@
     <section id="view-policy" data-view="policy" hidden></section>
     <section id="view-sessions" data-view="sessions" hidden></section>
   </main>
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <a class="footer-logo" href="https://astra.ru" target="_blank" rel="noopener noreferrer" aria-label="Сайт «Группы Астра»"><picture><source srcset="assets/astra-logo-on-dark.svg" media="(prefers-color-scheme: dark)"><img src="assets/astra-logo.svg" alt="Группа Астра" width="112" height="30"></picture></a>
+      <p>Кейс «ИИ‑сторож» от «Группы Астра» · НЭТИ‑НЕКСТ&nbsp;2.0 · 20–22&nbsp;ноября&nbsp;2026</p>
+      <p class="muted">Прототип команды-участника. Логотип «Астра» — знак «Группы Астра».</p>
+    </div>
+  </footer>
   <div id="toast" class="toast" role="status" hidden></div>
 </body>
 </html>
