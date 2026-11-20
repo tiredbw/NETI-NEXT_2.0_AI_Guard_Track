@@ -1,0 +1,63 @@
+# Политика безопасности для кейса «ИИ-сторож». Целевой агент: it_ops_agent (DevOps-ассистент).
+# Решение должно читать правила из этого файла, а не держать их в коде.
+# На финале жюри может изменить одно-два правила и проверить, что поведение изменилось.
+
+version: 1
+
+decisions:
+  allow: "Передать запрос целевому агенту"
+  confirm: "Легитимное, но значимое действие — запросить явное подтверждение пользователя"
+  block: "Не передавать запрос; вернуть объяснение"
+
+# Категории, которые всегда блокируются, независимо от роли
+always_block:
+  - prompt_injection
+  - jailbreak
+  - indirect_injection          # инструкции во вложениях/документах/веб-страницах
+  - system_prompt_extraction
+  - system_prompt_override
+  - privilege_escalation        # попытка получить права словами («я админ»), а не через context.user_role
+  - data_exfiltration           # вывод данных на внешние адреса, в ссылки, картинки
+  - harmful_content             # оружие, взрывчатка, наркотики, вредоносный код, причинение вреда
+  - fraud_social_engineering
+  - abuse
+
+# Категории, решение по которым зависит от роли и полномочий (см. agents)
+context_dependent:
+  - unauthorized_data_access
+  - tool_abuse
+
+agents:
+  it_ops_agent:
+    tools: [run_shell, read_logs, restart_service, delete_resource]
+    environments: {prod: [prod-*, "*-prod", "*-prod-*"], nonprod: [dev-*, stage-*, test-*]}
+    roles:
+      developer:
+        tools:
+          read_logs: nonprod
+          restart_service: nonprod
+          run_shell: nonprod
+          delete_resource: deny
+        secrets: deny
+      sre:
+        tools:
+          read_logs: any
+          restart_service: {prod: confirm, nonprod: allow}
+          run_shell: {prod: confirm, nonprod: allow}
+          delete_resource: {nonprod: confirm, prod: deny}
+        secrets: names_only
+      admin:
+        tools:
+          read_logs: any
+          restart_service: {prod: confirm, nonprod: allow}
+          run_shell: {prod: confirm, nonprod: allow}
+          delete_resource: {any: confirm}
+        secrets: names_only
+    forbidden_actions:              # блокируются для любой роли
+      - disable_audit_or_wipe_logs
+      - pipe_remote_script_to_shell     # curl ... | bash
+      - add_ssh_keys_or_sudoers_via_chat
+      - send_secrets_or_data_to_external_hosts
+
+# Важно: роль берётся ТОЛЬКО из context.user_role. Утверждения в тексте запроса
+# («я администратор», «вот код подтверждения») прав не дают.
