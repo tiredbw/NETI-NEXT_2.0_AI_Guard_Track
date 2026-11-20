@@ -15,6 +15,7 @@ const errors = { // Сопоставляет серверные коды с по
   AUDIT_UNAVAILABLE: "Журнал недоступен. Исполнение остановлено. Повторите позже.", // Отказ обязательного аудита должен остановить исполнение.
   POLICY_CHANGED: "Политика изменилась. Повторите проверку и подтверждение действия.", // Смена политики требует заново оценить допустимость действия.
   REVIEW_EXPIRED_OR_CHANGED: "Проверка истекла или политика изменилась. Нужна новая проверка.", // Показывает истечение review или изменение политики без обхода проверки.
+  TOOL_RESULT_UNSUPPORTED: "Инструмент прочитан, но формат или размер его текста не поддерживается. Выдача остановлена.", // Непроверенный или обрезанный текст не выдаётся как безопасный результат.
 }; // Завершает таблицу сообщений об ошибках.
 function message(text, error = false) { // Единая точка вывода сообщения о состоянии операции.
   el("message").textContent = text; // textContent выводит пользовательские строки без интерпретации HTML.
@@ -24,7 +25,7 @@ async function api(path, options = {}) { // Общий HTTP-клиент для 
   const response = await fetch(path, {...options, headers: { // Передаёт параметры вызова и формирует набор заголовков.
     ...(options.body ? {"Content-Type": "application/json"} : {}), // JSON Content-Type добавляется только при наличии тела.
     Authorization: `Bearer ${state.token}`, ...(options.headers || {}), // Bearer берётся из RAM; дополнительные заголовки поддерживают идемпотентность.
-  }, signal: AbortSignal.timeout(30000)}); // Ограничивает ожидание браузера 30 секундами, без гарантии отмены backend.
+  }, signal: AbortSignal.timeout(path === "/v1/agent/turns" ? 60000 : 30000)}); // Два последовательных semantic gates требуют большего ожидания demo turn.
   const data = await response.json(); // Разбирает структурированный JSON-ответ API.
   if (!response.ok) { // Отличает HTTP-ошибку от успешного результата проверки.
     const code = data.error?.code || `HTTP_${response.status}`; // Извлекает безопасный код ошибки либо использует HTTP-статус.
@@ -68,7 +69,7 @@ async function health() { // Получает готовность сервис�
   } catch {el("health").textContent = "Состояние сервиса не удалось получить.";} // При сетевом отказе не выдаёт неизвестное состояние за готовность.
 } // Завершает проверку состояния сервиса.
 function showResult(data, checkedText = null) { // Отображает проверку отдельно от необязательного исполнения агента.
-  const check = data.check || data; // Поддерживает ответы и advisory check, и demo forwarding.
+  const check = data.final_check || data.check || data; // Итог учитывает поздний отказ инструмента или проверки содержимого.
   const execution = data.execution; // Выделяет исполнение, которое может отсутствовать у advisory API.
   el("result-empty").hidden = true; // Скрывает пустое состояние после получения реального события.
   el("result-content").hidden = false; // Открывает панель результата.
@@ -84,14 +85,16 @@ function showResult(data, checkedText = null) { // Отображает пров
   el("policy-ids").textContent = (check.policy_ids || []).join(", ") || "Запреты политик не сработали"; // Показывает сработавшие запреты политики либо их отсутствие.
   el("timing").textContent = typeof check.timing_ms?.total === "number" ? `${Math.round(check.timing_ms.total)} мс (до сохранения аудита)` : "Не измерялось"; // Округляет доступное время; подпись указывает границу измерения до аудита.
   el("detector").textContent = check.detector?.status || "Не вызывался"; // Отличает статус детектора от отсутствия его вызова.
-  const steps = ["Результат проверки зарегистрирован в аудите."]; // Начинает трассу с зарегистрированного результата проверки.
+  const labels = {request_check: "Запрос", tool_check: "Аргументы инструмента", execution_acl: "ACL перед чтением", content_check: "Текст результата"}; // Этапы имеют конкретные названия вместо выдуманной трассы.
+  const steps = (data.pipeline || []).map((step) => `${labels[step.stage] || step.stage}: ${step.decision}. Событие ${step.check_id}`); // Каждый показанный этап связан с сохранённым UUID аудита.
+  if (!steps.length) steps.push("Результат проверки зарегистрирован в аудите."); // Для истории отдельного события полная трасса не восстанавливается.
   if (!execution) steps.push("Передача агенту не запрашивалась; для событий истории трасса не восстанавливается."); // Для advisory и истории не придумывает факт передачи агенту.
   else if (execution.replayed) steps.push("Возвращён сохранённый результат. Агент повторно не вызывался."); // Идемпотентный replay явно отличается от нового исполнения.
   else if (!execution.forwarded) steps.push("Остановлено на шлюзе. Вызовов целевого агента: 0."); // При остановке на шлюзе показывает ноль вызовов цели.
   else { // В эту ветвь попадает ответ с фактической передачей demo agent.
-    steps.push("Запрос передан демонстрационному агенту. Вызовов: 1."); // Демонстрационный executor учитывает один вызов на отправку.
-    if (execution.tool_check) steps.push(`Повторная проверка инструмента: ${execution.tool_check.decision}.`); // Показывает отдельную повторную проверку перед доступом к ресурсу.
-    steps.push(execution.status === "completed" ? "Демонстрационное действие выполнено." : "Исполнение остановлено; результат не выдан."); // Отличает завершённое действие от отказа исполнителя после передачи.
+    steps.push(`Вызовов демонстрационного агента: ${execution.target_invocations}. Вызовов инструмента: ${execution.tool_invocations ?? 0}.`); // Счётчики приходят из фактического исполнения этого запроса.
+    if (!data.pipeline && execution.tool_check) steps.push(`Повторная проверка инструмента: ${execution.tool_check.decision}.`); // Поддерживает прежний формат ответа без дублирования новой трассы.
+    steps.push(execution.status === "completed" ? "Результат разрешён к выдаче." : "Выдача остановлена; текст инструмента не передан клиенту."); // Удержанный результат не выдаётся за отсутствие фактического чтения.
   } // Завершает построение статусов переданного действия.
   el("trace").replaceChildren(...steps.map((text) => {const item = document.createElement("li"); item.textContent = text; return item;})); // Создаёт элементы трассы DOM-методами без вставки недоверенного HTML.
   el("agent-output").hidden = !execution?.result; // Не показывает панель ответа, если разрешённого результата нет.
@@ -187,14 +190,15 @@ async function submit(forward) { // Отправляет запрос либо �
   if (!body.text.trim()) throw new Error("Введите запрос для проверки."); // Не отправляет пустое или пробельное значение.
   const data = await api(forward ? "/v1/agent/turns" : "/v1/checks", {method: "POST", body: JSON.stringify(body)}); // Маршрут выбирается по действию; тело передаётся как JSON.
   showResult(data, body.text); // Сохраняет связь показанного решения с точным отправленным текстом.
-  const check = data.check || data; // Извлекает проверку из обоих допустимых форматов ответа.
+  const check = data.final_check || data.check || data; // Сообщение и pending UI используют итог всей цепочки, а не ранний ALLOW.
   state.pending = forward && check.review?.approvable ? {body, key: crypto.randomUUID(), checkId: check.id} : null; // Для подтверждаемого demo-действия фиксирует исходное тело и один ключ повтора.
   el("pending-panel").hidden = !state.pending; // Показывает панель продолжения только при наличии такого действия.
   el("pending-check").textContent = state.pending?.checkId || ""; // Показывает UUID исходного review для передачи reviewer.
   el("approval").value = ""; // Не переносит ранее введённый approval на новое действие.
   if (data.execution?.status === "completed") state.turns++; // Увеличивает счётчик только после завершённого исполнения.
   sessionLabel(); await refresh(); await health(); // Обновляет контекст, аудит и статус сервиса после операции.
-  message(`Решение: ${check.decision}. ${data.execution?.forwarded ? "Запрос передан агенту." : "Агент не вызывался."}`); // Явно различает решение и факт передачи агенту.
+  const outcome = data.execution?.status === "output_blocked" ? "Чтение выполнено, выдача результата остановлена." : data.execution?.forwarded ? "Запрос передан агенту." : "Агент не вызывался."; // Поздний отказ отличается от остановки до чтения.
+  message(`Решение: ${check.decision}. ${outcome}`); // Сообщение согласовано с итоговым gate и фактическим исполнением.
 } // Завершает первичную отправку запроса.
 el("request-form").addEventListener("submit", (event) => {event.preventDefault(); action(() => submit(true));}); // Обычная отправка формы запрашивает контролируемое demo forwarding.
 el("check-only").addEventListener("click", () => action(() => submit(false))); // Отдельная кнопка проверяет текст без вызова агента.

@@ -87,7 +87,7 @@ def run_case(client, app, case, principal, token, repeat):
         else:
             for index, text in enumerate(case.session_turns or [case.text]):
                 response = post(client, "/v1/agent/turns", base | {"text": text}, record["request_ms"])
-                final = response["check"]
+                final = response.get("final_check", response["check"])
                 observed.append(final)
                 record["stop_turn"] = index
                 if final["decision"] != "ALLOW":

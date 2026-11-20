@@ -25,6 +25,7 @@ from .demo import DemoAgent, plan  # Подключает demo для текущ
 from .approvals import ApprovalService  # Подключает approvals для текущего компонента.
 from .policies import PolicyService, policy_etag  # Подключает policies для текущего компонента.
 from .integration import IntegrationChecks  # Подключает integration для текущего компонента.
+from .pipeline import DemoPipeline, pipeline_reply  # Связывает классификацию, фактический инструмент и проверку его результата.
 
 
 def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, policy_path=None, retention_days=None):  # Собирает API, зависимости и состояние одного процесса шлюза.
@@ -84,6 +85,7 @@ def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, 
     approvals = ApprovalService(store, policy_service, agent)  # Подтверждения связаны с тем же demo executor.
     app.state.approvals = approvals  # Публикует зависимость или операционный статус в состоянии текущего приложения.
     integration = IntegrationChecks(store, policy_service, detector)  # Внешние проверки используют общие policy, detector и audit.
+    pipeline = DemoPipeline(agent, integration)  # Контролируемый demo использует те же проверки, что внешний адаптер.
     static_dir = Path(__file__).parent / "static"  # Статические ресурсы читаются из пакета приложения.
     app.mount("/static", StaticFiles(directory=static_dir), name="static")  # Вызывает app.mount в рамках текущей операции.
 
@@ -353,19 +355,19 @@ def create_app(*, credentials=None, db_path=None, hmac_key=None, detector=None, 
                                                 request.headers.get("Idempotency-Key"), histories[sid])  # Передаёт оставшиеся аргументы составного выражения без изменения их порядка.
                 if not result["execution"]["replayed"]:  # Идемпотентный replay не добавляет turn в историю второй раз.
                     histories[sid].append(body.text)  # Добавляет элемент в ограниченное состояние текущего процесса.
-                return result  # Возвращает вычисленный результат текущей операции.
+                result["execution"]["tool_invocations"] = 0 if result["execution"]["replayed"] else 1  # Replay не выполняет новую запись.
+                if result["execution"]["replayed"]:  # Cached result не должен завышать фактические вызовы этого запроса.
+                    result["execution"]["target_invocations"] = 0  # Сохранённый результат возвращён без повторного запуска executor.
+                return pipeline_reply(result["check"], result["execution"])  # Подтверждённая запись также получает фактическую трассу.
             intent = plan(body.text)  # Конкретный инструмент и ресурс, извлечённые из команды.
             gate = await run_in_threadpool(agent.preflight, principal, intent)  # Детерминированный результат проверки фактического инструмента.
             result = await evaluate(body, principal, gate)  # Результат текущей операции для последующей валидации или ответа.
             if result["review"]["approvable"]:  # Только штатное подтверждаемое действие сохраняется в pending.
                 await run_in_threadpool(approvals.remember, body, principal, result, histories[sid])  # Вызывает run_in_threadpool в рамках текущей операции.
-            execution = {"status": "not_forwarded", "forwarded": False, "agent_invocation_id": None,  # Описывает факт исполнения отдельно от результата классификации.
-                         "target_invocations": 0, "result": None}  # Поле target_invocations входит в структурированный контракт текущего результата.
-            if result["decision"] == "ALLOW":  # Demo executor вызывается только после положительной проверки.
-                execution = await run_in_threadpool(agent.invoke, principal, intent, result)  # Описывает факт исполнения отдельно от результата классификации.
-                if execution["status"] == "completed":  # Только завершённое действие дополняет историю разрешённых turns.
-                    histories[sid].append(body.text)  # Добавляет элемент в ограниченное состояние текущего процесса.
-            return {"check": result, "execution": execution}  # Возвращает структурированный результат текущей операции.
+            reply = await pipeline.run(body, principal, result, current[1])  # Передаёт результат только после всех применимых gates.
+            if reply["execution"]["status"] == "completed":  # Заблокированный tool output не попадает в разрешённую историю.
+                histories[sid].append(body.text)  # История фиксирует только успешно завершённый turn.
+            return reply  # Содержит исходную проверку, итоговое решение и фактическую трассу.
 
     @app.post("/v1/reviews/{check_id}/approve", status_code=201)  # Регистрирует маршрут или обработчик в текущем экземпляре API.
     def approve(check_id: str, body: StrictModel, principal=Depends(identity)):  # Выдаёт одноразовое подтверждение после повторной проверки условий.

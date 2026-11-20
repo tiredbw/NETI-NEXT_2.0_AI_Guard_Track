@@ -20,9 +20,9 @@ def test_allow_forwarding_and_read(setup):
     assert result["execution"]["result"]["adapter"] == "deterministic-demo"
     assert "организации A" in result["execution"]["result"]["content"]
     assert app.state.agent.invocations == 1
-    assert detector.calls == 1
+    assert detector.calls == 2
     history = client.get("/v1/checks").json()["items"]
-    assert len(history) == 2
+    assert len(history) == 4
     assert history[0]["parent_id"] == result["check"]["id"]
 
 
@@ -65,8 +65,9 @@ def test_recheck_at_execution(setup, monkeypatch):
     monkeypatch.setattr(app.state.agent, "preflight", race)
     result = client.post("/v1/agent/turns", json=body | {"text": "/read A1"}).json()
     assert result["check"]["decision"] == "ALLOW"
-    assert result["execution"]["status"] == "failed"
-    assert result["execution"]["tool_check"]["decision"] == "BLOCK"
+    assert result["execution"]["status"] == "not_forwarded"
+    assert result["execution"]["pre_tool_check"]["decision"] == "BLOCK"
+    assert result["final_check"]["decision"] == "BLOCK"
     assert result["execution"]["result"] is None
 
 
