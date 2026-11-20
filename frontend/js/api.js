@@ -12,10 +12,23 @@ export const isMock = () => Boolean(mock);
 export const mockAdminToken = () => (mock ? MOCK_ADMIN_TOKEN : null);
 export const apiOrigin = () => BASE || location.origin;
 
-// Токен для журнала, входящих агента и политики. Хранится только в памяти вкладки.
+// Токен для журнала, входящих агента и политики. Хранится только в памяти вкладки и общий для всех вкладок.
 let adminToken = '';
+const tokenEvents = new EventTarget();
 export const getAdminToken = () => adminToken || (mock ? MOCK_ADMIN_TOKEN : '');
-export function setAdminToken(t) { adminToken = String(t || '').trim(); }
+export const hasUserToken = () => Boolean(adminToken);
+export function setAdminToken(t, reason = 'user') {
+  const next = String(t || '').trim();
+  if (next === adminToken) return;
+  adminToken = next;
+  tokenEvents.dispatchEvent(new CustomEvent('change', { detail: { reason } }));
+}
+export const clearAdminToken = (reason = 'user') => setAdminToken('', reason);
+// Токен только что отклонён сервисом: разделы показывают «не подошёл», а не просто «нужен токен».
+let rejected = false;
+export function takeTokenRejected() { const r = rejected; rejected = false; return r; }
+export const authMessage = (e) => (takeTokenRejected() ? 'Токен не подошёл — проверьте его и введите снова.' : errorText(e));
+export const onTokenChange = (fn) => tokenEvents.addEventListener('change', (e) => fn(e.detail || {}));
 const PROTECTED = /^\/v1\/(journal|agent\/inbox|policy)/; // Маршруты, закрытые токеном на бэке.
 export const isAuthError = (e) => e instanceof ApiError && (e.status === 401 || e.status === 403);
 
@@ -31,6 +44,17 @@ export class ApiError extends Error {
 const TIMEOUT_MS = 15000;
 
 export async function api(method, path, body = null, headers = {}) {
+  try {
+    return await request(method, path, body, headers);
+  } catch (e) {
+    // Неверный токен не «залипает»: 401 — токена нет или он не принят; 403 на чтении — токен не подходит.
+    // 403 на изменении оставляем: у аудитора верный токен, просто без права менять политику.
+    if (PROTECTED.test(path) && hasUserToken() && e instanceof ApiError && (e.status === 401 || (e.status === 403 && method === 'GET'))) { rejected = true; clearAdminToken('rejected'); }
+    throw e;
+  }
+}
+
+async function request(method, path, body, headers) {
   // X-Guard-Client: ui — бэк хранит текст в журнале только для запросов из интерфейса.
   const token = PROTECTED.test(path) ? getAdminToken() : '';
   headers = { 'X-Guard-Client': 'ui', ...(token ? { 'X-Admin-Token': token } : {}), ...headers };
@@ -76,5 +100,6 @@ const ERROR_TEXT = {
 };
 export function errorText(err) {
   if (!(err instanceof ApiError)) return `Ошибка интерфейса: ${err.message}`;
+  if (err.code === 'forbidden' && err.body?.detail) return err.body.detail; // Сервис объясняет, чего именно не даёт токен.
   return ERROR_TEXT[err.code] || err.body?.detail || `Ошибка сервиса (HTTP ${err.status})`;
 }

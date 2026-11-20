@@ -51,14 +51,29 @@ pub async fn static_files(State(state): State<Arc<AppState>>, req: Request) -> R
     if req.uri().path().starts_with("/v1/") { return crate::app::error(StatusCode::NOT_FOUND, "not_found", "Маршрут не найден"); }
     let Some(path) = resolve(root, req.uri().path()) else { return StatusCode::NOT_FOUND.into_response() };
     match tokio::fs::read(&path).await {
-        Ok(bytes) => Response::builder()
-            .header(header::CONTENT_TYPE, content_type(&path))
-            .header(header::CACHE_CONTROL, "no-cache")
-            .header("x-content-type-options", "nosniff")
-            .body(Body::from(bytes))
-            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        Ok(bytes) => {
+            // ETag по содержимому: браузер перепроверяет файл на каждой загрузке и получает новую версию сразу после обновления.
+            let tag = etag(&bytes);
+            let fresh = req.headers().get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()).is_some_and(|v| v.split(',').any(|t| t.trim() == tag));
+            let builder = Response::builder()
+                .header(header::ETAG, &tag)
+                .header(header::CACHE_CONTROL, "no-cache")
+                .header("x-content-type-options", "nosniff");
+            let resp = if fresh {
+                builder.status(StatusCode::NOT_MODIFIED).body(Body::empty())
+            } else {
+                builder.header(header::CONTENT_TYPE, content_type(&path)).body(Body::from(bytes))
+            };
+            resp.unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+/// Сильный ETag: первые 16 байт sha256 содержимого в hex и в кавычках.
+pub fn etag(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("\"{}\"", hex::encode(&Sha256::digest(bytes)[..16]))
 }
 
 /// CORS только для перечисленных origin (CORS_ORIGINS). Свой origin в CORS не нуждается.
@@ -88,6 +103,14 @@ fn add_cors(resp: &mut Response, origin: &str) {
 mod tests {
     use super::resolve;
     use std::path::Path;
+
+    #[test]
+    fn etag_follows_content() {
+        let a = super::etag(b"one");
+        assert_eq!(a, super::etag(b"one"));
+        assert_ne!(a, super::etag(b"two"));
+        assert!(a.starts_with('"') && a.ends_with('"') && a.len() == 34);
+    }
 
     #[test]
     fn blocks_traversal() {

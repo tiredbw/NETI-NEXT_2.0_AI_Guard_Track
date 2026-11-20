@@ -6,6 +6,7 @@ import { analyze } from './detector.js';
 import { requestHash, maskSecrets, canonicalJson } from '../shared.js';
 
 export const MOCK_ADMIN_TOKEN = 'admin-demo';
+export const MOCK_AUDIT_TOKEN = 'audit-demo'; // Только чтение журнала, входящих и политики, как AUDIT_TOKEN у сервиса.
 const CONFIRM_TTL_MS = 10 * 60 * 1000;
 const SESSION_LIMITS = { max_turns: 20, ttl_minutes: 60 };
 
@@ -29,7 +30,7 @@ export function createMockServer({ latency = [80, 420] } = {}) {
     state.policyHistory.push({ version, updated_at: state.policy.updated_at, updated_by: state.policy.updated_by, comment: state.policy.comment });
   })();
 
-  async function runCheck(userPrompt, context, source) {
+  async function runCheck(userPrompt, context, source, keepText = true) {
     const started = performance.now();
     await sleep(latency[0] + Math.random() * (latency[1] - latency[0]));
     const { intent, signals, historyEffect } = analyze({ user_prompt: userPrompt, context });
@@ -50,7 +51,9 @@ export function createMockServer({ latency = [80, 420] } = {}) {
     state.journal.unshift({
       check_id: result.check_id, ts: now(), user_id: context.user_id, user_role: role, decision: result.decision,
       risk_level: result.risk_level, risk_category: result.risk_category, latency_ms: result.latency_ms,
-      policy_version: result.policy_version, prompt_masked: maskSecrets(userPrompt), explanation: result.explanation, source,
+      policy_version: result.policy_version, source, request_hash: result.request_hash, text_stored: keepText, policy_rule: result.policy_rule,
+      // Внешний /v1/check хранится без текста и объяснения, как у сервиса: закрытый тест не оседает в журнале.
+      prompt_masked: keepText ? maskSecrets(userPrompt) : '', explanation: keepText ? result.explanation : '',
     });
     return { result, historyEffect };
   }
@@ -106,7 +109,8 @@ export function createMockServer({ latency = [80, 420] } = {}) {
 
     if (method === 'POST' && path === '/v1/check') {
       if (typeof body?.user_prompt !== 'string' || typeof body?.context !== 'object') return fail(400, 'invalid_input', 'Нужны user_prompt и context');
-      const { result } = await runCheck(body.user_prompt, body.context, 'check');
+      const ui = String(headers['X-Guard-Client'] || headers['x-guard-client'] || '').toLowerCase() === 'ui';
+      const { result } = await runCheck(body.user_prompt, body.context, ui ? 'ui_check' : 'check', ui);
       return ok(result);
     }
     if (method === 'POST' && path === '/v1/demo/submit') {
@@ -130,6 +134,13 @@ export function createMockServer({ latency = [80, 420] } = {}) {
         s.turns.push({ index: s.turns.length, role: 'assistant', content: `Агент получил подтверждённый запрос (квитанция ${receipt.receipt_id}).`, ts: now() });
       }
       return ok({ status: 'forwarded', receipt });
+    }
+    // Журнал, входящие агента и политика закрыты токеном, как у сервиса: админ или аудитор читают, менять может только админ.
+    const readerPaths = ['/v1/journal', '/v1/agent/inbox', '/v1/policy', '/v1/policy/history'];
+    if ((method === 'GET' && readerPaths.includes(path)) || (method === 'POST' && path === '/v1/policy/validate')) {
+      const t = headers['X-Admin-Token'] || headers['x-admin-token'];
+      if (!t) return fail(401, 'unauthorized', 'Нужен заголовок X-Admin-Token');
+      if (t !== MOCK_ADMIN_TOKEN && t !== MOCK_AUDIT_TOKEN) return fail(403, 'forbidden', 'Токен не даёт доступа к журналу и политике');
     }
     if (method === 'GET' && path === '/v1/agent/inbox') return ok({ items: state.inbox.slice(0, Number(q.limit) || 50) });
 

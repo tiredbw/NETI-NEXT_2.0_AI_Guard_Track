@@ -1,6 +1,6 @@
 // Вкладка «Агент»: что реально получила заглушка целевого агента.
 
-import { api, errorText, isAuthError, setAdminToken } from '../api.js';
+import { api, errorText, isAuthError, setAdminToken, authMessage } from '../api.js';
 import { h, clear, tokenGate, decisionBadge, fmtTime, busy, on } from '../ui.js';
 
 let els = {};
@@ -11,7 +11,8 @@ async function load() {
     const { items } = await api('GET', '/v1/agent/inbox?limit=100');
     render(items);
   } catch (e) {
-    if (isAuthError(e)) clear(els.body).append(h('div', { class: 'banner error' }, errorText(e)), tokenGate((t) => { setAdminToken(t); load(); }));
+    els.count.textContent = '';
+    if (isAuthError(e)) clear(els.body).append(h('div', { class: 'banner error' }, authMessage(e)), tokenGate((t) => setAdminToken(t)));
     else clear(els.body).append(h('div', { class: 'banner error' }, errorText(e)));
   } finally {
     busy(els.refresh, false);

@@ -1,6 +1,6 @@
 // Вкладка «Журнал»: проверки с фильтрами по времени, решению, категории и роли.
 
-import { api, errorText, isAuthError, setAdminToken } from '../api.js';
+import { api, errorText, isAuthError, setAdminToken, authMessage } from '../api.js';
 import { h, clear, tokenGate, decisionBadge, riskBadge, fmtTime, fmtMs, busy, select, field } from '../ui.js';
 import { ROLES } from '../data.js';
 import { ALL_CATEGORIES } from '../mock/policy.js';
@@ -39,7 +39,10 @@ async function load(append = false) {
     total = r.total;
     render();
   } catch (e) {
-    if (isAuthError(e)) clear(els.body).append(h('div', { class: 'banner error' }, errorText(e)), tokenGate((t) => { setAdminToken(t); load(); }));
+    items = []; total = 0; open.clear(); // Не оставляем старые строки и счётчик.
+    els.count.textContent = '';
+    els.more.hidden = true;
+    if (isAuthError(e)) clear(els.body).append(h('div', { class: 'banner error' }, authMessage(e)), tokenGate((t) => setAdminToken(t)));
     else clear(els.body).append(h('div', { class: 'banner error' }, errorText(e)));
   } finally {
     busy(btn, false);
@@ -77,7 +80,7 @@ function render() {
           e.request_hash ? h('dt', {}, 'Хеш запроса') : null, e.request_hash ? h('dd', {}, h('code', {}, e.request_hash)) : null,
           h('dt', {}, 'Объяснение'), h('dd', {}, e.explanation || '—'),
           h('dt', {}, 'ID проверки'), h('dd', {}, h('code', {}, e.check_id)),
-          h('dt', {}, 'Источник'), h('dd', {}, { check: 'POST /v1/check', demo: 'демо-отправка агенту', session: 'сессия' }[e.source] || e.source || '—')))));
+          h('dt', {}, 'Источник'), h('dd', {}, { check: 'POST /v1/check (внешний)', ui_check: 'POST /v1/check из интерфейса', demo: 'демо-отправка агенту', session: 'сессия' }[e.source] || e.source || '—')))));
     }
   }
   box.append(h('div', { class: 'table-wrap' }, h('table', {},
