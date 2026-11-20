@@ -12,6 +12,13 @@ export const isMock = () => Boolean(mock);
 export const mockAdminToken = () => (mock ? MOCK_ADMIN_TOKEN : null);
 export const apiOrigin = () => BASE || location.origin;
 
+// Токен для журнала, входящих агента и политики. Хранится только в памяти вкладки.
+let adminToken = '';
+export const getAdminToken = () => adminToken || (mock ? MOCK_ADMIN_TOKEN : '');
+export function setAdminToken(t) { adminToken = String(t || '').trim(); }
+const PROTECTED = /^\/v1\/(journal|agent\/inbox|policy)/; // Маршруты, закрытые токеном на бэке.
+export const isAuthError = (e) => e instanceof ApiError && (e.status === 401 || e.status === 403);
+
 export class ApiError extends Error {
   constructor(status, body) {
     super(body?.detail || body?.error || `HTTP ${status}`);
@@ -24,6 +31,9 @@ export class ApiError extends Error {
 const TIMEOUT_MS = 15000;
 
 export async function api(method, path, body = null, headers = {}) {
+  // X-Guard-Client: ui — бэк хранит текст в журнале только для запросов из интерфейса.
+  const token = PROTECTED.test(path) ? getAdminToken() : '';
+  headers = { 'X-Guard-Client': 'ui', ...(token ? { 'X-Admin-Token': token } : {}), ...headers };
   if (mock) {
     const r = await mock.handle(method, path, body, headers);
     if (r.status >= 400) throw new ApiError(r.status, r.body);
@@ -58,8 +68,8 @@ const ERROR_TEXT = {
   already_used: 'Это подтверждение уже использовано.',
   expired: 'Срок действия истёк.',
   wrong_user: 'Доступно только владельцу — пользователю, который отправил запрос или создал сессию.',
-  unauthorized: 'Нужен админ-токен.',
-  forbidden: 'Токен не даёт права менять политику.',
+  unauthorized: 'Нужен токен администратора или аудитора.',
+  forbidden: 'Токен не подходит.',
   invalid_policy: 'Политика не прошла проверку.',
   session_full: 'Лимит реплик в сессии исчерпан.',
   not_found: 'Не найдено.',

@@ -81,3 +81,14 @@ export function select(options, value, attrs = {}) {
 const bus = new EventTarget();
 export const emit = (name, detail) => bus.dispatchEvent(new CustomEvent(name, { detail }));
 export const on = (name, fn) => bus.addEventListener(name, (e) => fn(e.detail));
+
+// Карточка ввода токена для закрытых разделов (журнал, входящие агента, политика).
+export function tokenGate(onToken, message) {
+  const input = h('input', { type: 'password', autocomplete: 'off', placeholder: 'X-Admin-Token' });
+  const submit = () => { if (input.value.trim()) onToken(input.value.trim()); else input.focus(); };
+  input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') submit(); });
+  return h('div', { class: 'card' },
+    h('p', {}, message || 'Раздел доступен только с токеном администратора или аудитора: в журнале лежат данные проверок.'),
+    field('Токен', input, 'Токен хранится только в памяти этой вкладки.'),
+    h('div', { class: 'row' }, h('button', { type: 'button', onclick: submit }, 'Открыть')));
+}

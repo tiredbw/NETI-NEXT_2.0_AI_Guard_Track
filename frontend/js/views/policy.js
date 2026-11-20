@@ -1,7 +1,7 @@
 // Вкладка «Политика»: действующий YAML, версия, валидация и применение с админ-токеном.
 
-import { api, errorText, mockAdminToken, ApiError } from '../api.js';
-import { h, clear, decisionBadge, fmtTime, busy, field, select, toast, emit, ROLE_RU } from '../ui.js';
+import { api, errorText, mockAdminToken, ApiError, isAuthError, setAdminToken, getAdminToken } from '../api.js';
+import { h, clear, tokenGate, decisionBadge, fmtTime, busy, field, select, toast, emit, ROLE_RU } from '../ui.js';
 import { DEMO_USERS, ROLES, buildContext } from '../data.js';
 
 let els = {};
@@ -37,6 +37,11 @@ async function loadPolicy() {
     if (!els.editor.dataset.dirty) els.editor.value = current.yaml;
     emit('policy', current.version);
   } catch (e) {
+    if (isAuthError(e)) {
+      clear(els.meta).append(h('div', { class: 'banner error' }, errorText(e)), tokenGate((t) => { setAdminToken(t); els.token.value = t; loadPolicy(); }, 'Политика открывается с токеном администратора (просмотр и изменение) или аудитора (только просмотр).'));
+      clear(els.history);
+      return;
+    }
     clear(els.meta).append(h('div', { class: 'banner error' }, errorText(e)));
   }
   loadHistory();
@@ -80,7 +85,8 @@ async function validate() {
 }
 
 async function applyPolicy() {
-  adminToken = els.token.value.trim();
+  adminToken = els.token.value.trim() || getAdminToken();
+  if (adminToken) setAdminToken(adminToken); // Тот же токен открывает журнал и входящие агента.
   if (!adminToken) { els.token.focus(); showValidation(false, ['Для применения нужен админ-токен. Изменять политику может только администратор политики.']); return; }
   busy(els.apply, true, 'Применяем…');
   try {

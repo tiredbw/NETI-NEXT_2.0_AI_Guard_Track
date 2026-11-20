@@ -80,7 +80,7 @@ fn add_cors(resp: &mut Response, origin: &str) {
     if let Ok(v) = HeaderValue::from_str(origin) { h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, v); }
     h.insert(header::VARY, HeaderValue::from_static("Origin"));
     h.insert(header::ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("GET, POST, PUT, DELETE, OPTIONS"));
-    h.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("Content-Type, X-Admin-Token"));
+    h.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("Content-Type, X-Admin-Token, X-Guard-Client"));
     h.insert(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("600"));
 }
 

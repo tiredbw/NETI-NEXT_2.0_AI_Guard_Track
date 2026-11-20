@@ -29,7 +29,9 @@ async fn main() {
         policy: ArcSwap::from_pointee(policy), // Начальная политика.
         policy_path: policy_path.into(), // Файл для перезагрузки.
         detector: detector.clone(), // Детектор.
+        tfidf: load_tfidf(), // TF-IDF-классификатор.
         admin_token: std::env::var("ADMIN_TOKEN").ok().filter(|t| !t.is_empty()), // Токен админа из окружения.
+        audit_token: std::env::var("AUDIT_TOKEN").ok().filter(|t| !t.is_empty()), // Токен аудитора: только чтение.
         store: Store::new(journal_path), // Журнал, входящие агента, подтверждения, сессии.
         frontend_dir, // Каталог фронтенда; None — сервис отдаёт только API.
         cors_origins, // Origin отдельного dev-сервера фронта.
@@ -48,4 +50,13 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind"); // Открываем порт.
     tracing::info!(%addr, "listening"); // Адрес в лог.
     axum::serve(listener, router(state)).await.expect("server"); // Запускаем сервер.
+}
+
+/// Загружает TF-IDF-модель; без неё сервис работает, но без второго сигнала.
+fn load_tfidf() -> Option<astraguard::tfidf::Tfidf> {
+    let path = std::env::var("TFIDF_MODEL").unwrap_or_else(|_| "models/tfidf.json".into()); // Путь к модели.
+    match astraguard::tfidf::Tfidf::load(&path) { // Загрузка со сверкой.
+        Ok(t) => { tracing::info!(%path, threshold = t.threshold, backstop = t.backstop, "tfidf loaded"); Some(t) } // Готово.
+        Err(e) => { tracing::warn!(%e, "tfidf disabled"); None } // Сервис работает без него.
+    }
 }

@@ -181,7 +181,13 @@ pub struct JournalEntry {
     pub policy_version: String, // Версия политики на момент проверки.
     pub prompt_masked: String, // Запрос без значений секретов.
     pub explanation: String, // Объяснение решения.
-    pub source: String, // check, demo или session.
+    pub source: String, // check, ui_check, demo или session.
+    #[serde(default)] // Старые записи журнала без поля.
+    pub request_hash: String, // sha256 запроса: по нему можно сверить проверку без хранения текста.
+    #[serde(default)] // Старые записи журнала без поля.
+    pub text_stored: bool, // false — текст и объяснение не сохранялись (внешний вызов /v1/check).
+    #[serde(default)] // Старые записи журнала без поля.
+    pub policy_rule: Option<String>, // Сработавшее правило политики.
 }
 
 /// Реплика сохранённой сессии.
