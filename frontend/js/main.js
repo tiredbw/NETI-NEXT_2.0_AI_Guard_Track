@@ -31,16 +31,19 @@ function setVersion(v) {
 async function health() {
   const dot = document.getElementById('health-dot');
   const text = document.getElementById('health-text');
+  const model = document.getElementById('health-model');
   const banner = document.getElementById('global-banner');
   try {
     const r = await api('GET', '/health');
     dot.className = 'dot ok';
-    text.textContent = r.model ? `сервис работает · ${r.model}` : 'сервис работает';
+    text.textContent = 'сервис работает';
+    model.textContent = r.model ? ` · ${r.model}` : '';
     setVersion(r.policy_version);
     if (!isMock()) banner.hidden = true;
   } catch (e) {
     dot.className = 'dot bad';
     text.textContent = 'сервис недоступен';
+    model.textContent = '';
     if (!isMock()) {
       banner.className = 'banner error';
       banner.replaceChildren(

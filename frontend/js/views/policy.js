@@ -54,11 +54,11 @@ async function loadHistory() {
 }
 
 function renderMeta() {
-  clear(els.meta).append(h('div', { class: 'policy-meta' },
-    h('span', {}, 'Версия: ', h('code', {}, current.version)),
-    h('span', {}, 'Изменена: ', fmtTime(current.updated_at, true)),
-    h('span', {}, 'Автор: ', current.updated_by),
-    current.comment ? h('span', { class: 'muted' }, current.comment) : null));
+  clear(els.meta).append(h('dl', { class: 'kv policy-meta' },
+    h('dt', {}, 'Версия'), h('dd', {}, h('code', {}, current.version)),
+    h('dt', {}, 'Изменена'), h('dd', {}, fmtTime(current.updated_at, true)),
+    h('dt', {}, 'Автор'), h('dd', {}, current.updated_by),
+    current.comment ? [h('dt', {}, 'Комментарий'), h('dd', {}, current.comment)] : null));
 }
 
 function showValidation(valid, errors, extra) {
@@ -155,14 +155,15 @@ export function mount(el) {
       h('div', { class: 'card' },
         els.meta,
         field('YAML политики', els.editor, 'Изменение применяется сразу: без правки кода, без перезапуска и без переобучения модели.'),
-        h('div', { class: 'inline-fields' }, field('Комментарий к версии', els.comment), field('Админ-токен', els.token, mockToken ? `В мок-режиме токен: ${mockToken}` : 'Хранится только в памяти этой вкладки.')),
+        h('div', { class: 'inline-fields' }, field('Комментарий к версии', els.comment), field('Админ-токен', els.token)),
+        h('p', { class: 'muted small field-note' }, mockToken ? `Админ-токен мока: ${mockToken}. Токен хранится только в памяти вкладки.` : 'Токен хранится только в памяти этой вкладки.'),
         h('div', { class: 'row' }, els.validate, els.apply, els.revert),
         els.validation),
       h('div', {},
         h('div', { class: 'card' },
           h('h2', {}, 'Сценарий для жюри'),
           h('p', { class: 'small' }, '1. Проверьте запрос. 2. Подставьте правку и примените политику. 3. Проверьте тот же запрос снова.'),
-          h('div', { class: 'inline-fields' }, field('Роль', els.juryRole), field('Запрос', els.juryPrompt)),
+          h('div', { class: 'jury-fields' }, field('Роль', els.juryRole), field('Запрос', els.juryPrompt)),
           h('div', { class: 'row' }, els.juryRun),
           h('h3', { style: 'margin-top:16px' }, 'Готовые правки'),
           h('div', { class: 'stack' }, ...JURY_EDITS.map((ed) => h('div', {},
