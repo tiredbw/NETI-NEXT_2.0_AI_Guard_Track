@@ -106,7 +106,7 @@ export function mount(el) {
     h('div', { class: 'section-head' }, h('h2', {}, 'Журнал проверок'), els.count),
     h('p', { class: 'muted' }, 'Каждая проверка: время, пользователь, роль, решение, категория, риск, задержка и версия политики. Секреты в тексте запроса маскируются до записи. Нажмите на строку, чтобы увидеть объяснение.'),
     h('form', { class: 'card', style: 'margin-bottom:16px', onsubmit: (e) => { e.preventDefault(); load(); } },
-      h('div', { class: 'inline-fields' },
+      h('div', { class: 'filters' },
         field('С', els.since), field('По', els.until), field('Решение', els.decision), field('Категория', els.category), field('Роль', els.role)),
       h('div', { class: 'row' }, els.apply, els.reset, els.lastHour)),
     els.body,
