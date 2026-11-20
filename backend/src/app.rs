@@ -25,6 +25,7 @@ pub struct AppState {
     pub policy: ArcSwap<Policy>, // Текущая политика; каждый запрос берёт снимок.
     pub policy_path: PathBuf, // Файл, из которого перечитываем политику.
     pub detector: Detector, // Клиент Ollama.
+    pub tfidf: Option<crate::tfidf::Tfidf>, // TF-IDF-классификатор; None — файл модели не найден.
     pub admin_token: Option<String>, // Токен админа для изменения политики; None — изменение выключено.
     pub audit_token: Option<String>, // Токен только для чтения журнала, входящих агента и политики; None — читать может только админ.
     pub store: Store, // Журнал, входящие агента, подтверждения, сессии, история политики.
@@ -101,18 +102,44 @@ async fn evaluate(state: &AppState, raw: Value) -> Result<(CheckResponse, CheckR
     let det = state.detector.classify(&message).await; // Почти всё время ответа.
     let model_reason = det.as_ref().ok().map(|d| d.reason.clone()).unwrap_or_default(); // Пояснение самой модели для сигнала model.
     let followup = crate::history::secret_followup(&req, &prompt); // Просьба выдать секреты, о которых шла речь раньше.
+    let variants = normalize::hidden_variants(&req.user_prompt); // Раскодированные варианты запроса.
+    let rule_hit = crate::rules::check(&prompt, &variants, req.context.user_role); // Детерминированные правила.
+    let tf = state.tfidf.as_ref().map(|t| (t.score(&req, &variants), t.threshold, t.backstop)); // Второй сигнал, микросекунды.
     let det = det.map(|mut d| {
         if let Some(word) = &followup {
             if d.secrets != "values" { d.secrets = "values".into(); d.reason = format!("реплика ссылается на предыдущую о «{word}» и просит выдать содержимое"); }
         }
+        if let Some(hit) = &rule_hit { crate::rules::apply(&mut d, hit); } // Правила только усиливают ответ модели.
         d
     });
-    let v = decide::decide(&policy, req.context.user_role, &env, det.as_ref().map_err(|e| *e));
+    let mut v = decide::decide(&policy, req.context.user_role, &env, det.as_ref().map_err(|e| *e));
+    if let (Some(hit), Ok(_)) = (&rule_hit, &det) {
+        if hit.hard_block && v.decision != Decision::Block { // Разрушительная команда: block для любой роли.
+            v.decision = Decision::Block;
+            v.risk_level = crate::contract::RiskLevel::Critical;
+            v.risk_category = hit.category;
+            v.explanation = format!("Запрос заблокирован: {}. Такие команды не выполняются ни в одной роли.", hit.detail);
+            v.policy_rule = Some(hit.rule.into());
+        }
+    }
+    if let (Some((s, threshold, true)), Ok(_)) = (tf, &det) {
+        let cat = crate::policy::category_name(s.category); // Категория по классификатору.
+        let blockable = policy.always_blocks(s.category) || policy.file.context_dependent.iter().any(|c| c == cat); // Категория блокируется политикой.
+        if v.decision == Decision::Allow && s.p_attack >= threshold && blockable { // Qwen пропустил, классификатор уверен.
+            v.decision = Decision::Block;
+            v.risk_level = crate::contract::RiskLevel::High;
+            v.risk_category = s.category;
+            v.explanation = format!("Классификатор TF-IDF уверенно видит атаку {cat} (p={:.2}), хотя основной детектор её не отметил. Запрос заблокирован как страховка.", s.p_attack);
+            v.policy_rule = Some("backstop.tfidf".into());
+        }
+    }
     let mut signals = Vec::new();
     match &det {
         Ok(d) => signals.push(Signal { source: "model".into(), label: crate::policy::category_name(d.category).into(), detail: mask::mask_secrets(&model_reason) }),
         Err(e) => signals.push(Signal { source: "model".into(), label: "error".into(), detail: format!("{e:?}") }),
     }
+    if let Some((s, threshold, _)) = tf { signals.push(Signal { source: "tfidf".into(), label: crate::policy::category_name(s.category).into(), detail: format!("p(атака)={:.2}, порог {:.2}", s.p_attack, threshold) }); }
+    if let Some(hit) = &rule_hit { signals.push(Signal { source: "rules".into(), label: hit.rule.into(), detail: hit.detail.into() }); }
     signals.push(Signal { source: "policy".into(), label: format!("{:?}", v.decision).to_lowercase(), detail: v.policy_rule.clone().unwrap_or_else(|| "нет правила".into()) });
     if !env.evidence.is_empty() { signals.push(Signal { source: "rules".into(), label: "env".into(), detail: env.evidence.clone() }); }
     if !req.context.attachments.is_empty() { signals.push(Signal { source: "attachment".into(), label: "вложения".into(), detail: format!("{} шт. переданы детектору как данные", req.context.attachments.len()) }); }
