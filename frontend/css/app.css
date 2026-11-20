@@ -18,6 +18,7 @@
   --block-bg: #fbe5e6;
   --info-bg: #e6eefb;
   --info: #23468f;
+  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%2356645f' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --radius: 8px;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -47,6 +48,7 @@
     --block-bg: #3a171a;
     --info-bg: #17233d;
     --info: #a9c1ff;
+    --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%239aaaa4' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   }
 }
 
@@ -120,7 +122,15 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
 }
 .inline-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
 /* Однострочные поля и списки одной высоты; у даты и времени фиксированный формат, ширину даём под него. */
-input:not([type="checkbox"]):not([type="radio"]), select { height: 40px; padding-top: 0; padding-bottom: 0; line-height: 38px; }
+input:not([type="checkbox"]):not([type="radio"]) { height: 40px; padding-top: 0; padding-bottom: 0; line-height: 38px; }
+/* Своя стрелка вместо нативной: одинаково по центру во всех браузерах и темах. */
+select {
+  height: 40px; padding: 0 36px 0 10px; line-height: 1.2;
+  appearance: none; -webkit-appearance: none;
+  background-image: var(--chevron); background-repeat: no-repeat; background-position: right 12px center; background-size: 12px 8px;
+  text-overflow: ellipsis; cursor: pointer;
+}
+select::-ms-expand { display: none; }
 input[type="datetime-local"] { font-variant-numeric: tabular-nums; padding-right: 8px; }
 input[type="datetime-local"]::-webkit-datetime-edit { padding: 0; line-height: 38px; }
 input[type="datetime-local"]::-webkit-calendar-picker-indicator { margin-left: 4px; cursor: pointer; }
