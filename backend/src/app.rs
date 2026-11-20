@@ -26,6 +26,7 @@ pub struct AppState {
     pub policy_path: PathBuf, // Файл, из которого перечитываем политику.
     pub detector: Detector, // Клиент Ollama.
     pub admin_token: Option<String>, // Токен админа для изменения политики; None — изменение выключено.
+    pub audit_token: Option<String>, // Токен только для чтения журнала, входящих агента и политики; None — читать может только админ.
     pub store: Store, // Журнал, входящие агента, подтверждения, сессии, история политики.
     pub frontend_dir: Option<PathBuf>, // Каталог фронтенда для раздачи со своего origin.
     pub cors_origins: Vec<String>, // Origin отдельного dev-сервера фронта.
@@ -46,9 +47,31 @@ fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<(), Response> 
     match (&state.admin_token, got) {
         (_, None) => Err(error(StatusCode::UNAUTHORIZED, "unauthorized", "Нужен заголовок X-Admin-Token")),
         (None, Some(_)) => Err(error(StatusCode::FORBIDDEN, "forbidden", "Управление политикой выключено: ADMIN_TOKEN не задан")),
-        (Some(expected), Some(t)) if expected == t => Ok(()),
+        (Some(expected), Some(t)) if token_eq(expected, t) => Ok(()),
         _ => Err(error(StatusCode::FORBIDDEN, "forbidden", "Токен не даёт права менять политику")),
     }
+}
+
+/// Проверка права читать журнал, входящие агента и политику: подходит токен админа или токен аудитора.
+/// Без заданных токенов чтение закрыто: журнал не должен открываться всем, кто достучался до порта.
+fn require_reader(state: &AppState, headers: &HeaderMap) -> Result<(), Response> {
+    let got = headers.get("x-admin-token").and_then(|v| v.to_str().ok()).filter(|s| !s.is_empty());
+    let Some(t) = got else { return Err(error(StatusCode::UNAUTHORIZED, "unauthorized", "Нужен заголовок X-Admin-Token")) }; // Токена нет — 401.
+    let known = [&state.admin_token, &state.audit_token]; // Админ может всё, аудитор только читать.
+    if known.iter().any(|k| k.as_deref().is_some_and(|k| token_eq(k, t))) { return Ok(()); } // Совпал один из токенов.
+    if known.iter().all(|k| k.is_none()) { return Err(error(StatusCode::FORBIDDEN, "forbidden", "Чтение закрыто: ADMIN_TOKEN и AUDIT_TOKEN не заданы")); } // Токены не настроены.
+    Err(error(StatusCode::FORBIDDEN, "forbidden", "Токен не даёт доступа к журналу и политике")) // Неверный токен.
+}
+
+/// Сравнение токенов за время, не зависящее от места первого расхождения.
+fn token_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes()); // Сравниваем байты.
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0 // Без раннего выхода.
+}
+
+/// Запрос пришёл из нашего интерфейса: фронт ставит X-Guard-Client: ui. Тестовый клиент организаторов его не ставит.
+fn from_ui(headers: &HeaderMap) -> bool {
+    headers.get("x-guard-client").and_then(|v| v.to_str().ok()).is_some_and(|v| v.eq_ignore_ascii_case("ui"))
 }
 
 // ---------- оценка ----------
@@ -107,13 +130,19 @@ async fn evaluate(state: &AppState, raw: Value) -> Result<(CheckResponse, CheckR
     Ok((resp, req))
 }
 
-/// Пишет проверку в журнал: только маскированный текст.
-fn journal(state: &AppState, r: &CheckResponse, req: &CheckRequest, source: &str) {
+/// Пишет проверку в журнал. Текст (маскированный) хранится только для запросов из интерфейса;
+/// для внешних вызовов /v1/check остаются хеш, решение и метаданные, чтобы закрытый тест не оседал в журнале.
+fn journal(state: &AppState, r: &CheckResponse, req: &CheckRequest, source: &str, keep_text: bool) {
+    let (prompt_masked, explanation) = if keep_text {
+        (mask::mask_secrets(&req.user_prompt), mask::mask_secrets(&r.explanation)) // Демо: текст без значений секретов.
+    } else {
+        (String::new(), String::new()) // Внешний вызов: ни текста, ни объяснения (модель может цитировать запрос).
+    };
     state.store.journal_push(JournalEntry {
         check_id: r.check_id.clone(), ts: now_iso(), user_id: req.context.user_id.clone(), user_role: req.context.user_role,
         decision: r.decision, risk_level: r.risk_level, risk_category: r.risk_category, latency_ms: r.latency_ms,
-        policy_version: r.policy_version.clone(), prompt_masked: mask::mask_secrets(&req.user_prompt),
-        explanation: mask::mask_secrets(&r.explanation), source: source.into(),
+        policy_version: r.policy_version.clone(), prompt_masked, explanation, source: source.into(),
+        request_hash: r.request_hash.clone(), text_stored: keep_text, policy_rule: r.policy_rule.clone(),
     });
 }
 
@@ -130,10 +159,11 @@ fn parse_body(body: &[u8]) -> Result<Value, Response> {
 }
 
 /// POST /v1/check: только оценка.
-async fn check(State(state): State<Arc<AppState>>, body: axum::body::Bytes) -> Response {
+async fn check(State(state): State<Arc<AppState>>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
     let raw = match parse_body(&body) { Ok(v) => v, Err(e) => return e };
+    let ui = from_ui(&headers); // Текст сохраняем только для демо из интерфейса.
     match evaluate(&state, raw).await {
-        Ok((r, req)) => { journal(&state, &r, &req, "check"); Json(r).into_response() }
+        Ok((r, req)) => { journal(&state, &r, &req, if ui { "ui_check" } else { "check" }, ui); Json(r).into_response() }
         Err(e) => e,
     }
 }
@@ -163,7 +193,7 @@ fn route_to_agent(state: &AppState, check: CheckResponse, req: &CheckRequest, se
 async fn demo_submit(State(state): State<Arc<AppState>>, body: axum::body::Bytes) -> Response {
     let raw = match parse_body(&body) { Ok(v) => v, Err(e) => return e };
     match evaluate(&state, raw).await {
-        Ok((r, req)) => { journal(&state, &r, &req, "demo"); Json(route_to_agent(&state, r, &req, None)).into_response() }
+        Ok((r, req)) => { journal(&state, &r, &req, "demo", true); Json(route_to_agent(&state, r, &req, None)).into_response() }
         Err(e) => e,
     }
 }
@@ -186,8 +216,9 @@ async fn demo_confirm(State(state): State<Arc<AppState>>, Json(body): Json<Confi
 struct LimitQuery { limit: Option<usize> }
 
 /// GET /v1/agent/inbox: что реально получила заглушка агента.
-async fn agent_inbox(State(state): State<Arc<AppState>>, Query(q): Query<LimitQuery>) -> Json<Value> {
-    Json(json!({"items": state.store.inbox(q.limit.unwrap_or(50).min(500))}))
+async fn agent_inbox(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<LimitQuery>) -> Response {
+    if let Err(e) = require_reader(&state, &headers) { return e; } // Только с токеном.
+    Json(json!({"items": state.store.inbox(q.limit.unwrap_or(50).min(500))})).into_response()
 }
 
 // ---------- журнал ----------
@@ -196,7 +227,8 @@ async fn agent_inbox(State(state): State<Arc<AppState>>, Query(q): Query<LimitQu
 struct JournalQuery { since: Option<String>, until: Option<String>, decision: Option<String>, category: Option<String>, role: Option<String>, limit: Option<usize>, offset: Option<usize> }
 
 /// GET /v1/journal: фильтры по времени, решению, категории и роли.
-async fn journal_list(State(state): State<Arc<AppState>>, Query(q): Query<JournalQuery>) -> Json<Value> {
+async fn journal_list(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<JournalQuery>) -> Response {
+    if let Err(e) = require_reader(&state, &headers) { return e; } // Только с токеном.
     let since = q.since.filter(|s| !s.is_empty());
     let until = q.until.filter(|s| !s.is_empty());
     let (items, total) = state.store.journal_query(|e| {
@@ -206,7 +238,7 @@ async fn journal_list(State(state): State<Arc<AppState>>, Query(q): Query<Journa
             && q.category.as_deref().is_none_or(|c| c.is_empty() || json_name(&e.risk_category) == c)
             && q.role.as_deref().is_none_or(|r| r.is_empty() || json_name(&e.user_role) == r)
     }, q.offset.unwrap_or(0), q.limit.unwrap_or(50).min(500));
-    Json(json!({"items": items, "total": total}))
+    Json(json!({"items": items, "total": total})).into_response()
 }
 
 /// Имя enum так, как оно выглядит в JSON (snake_case).
@@ -217,7 +249,8 @@ fn json_name<T: serde::Serialize>(v: &T) -> String {
 // ---------- политика ----------
 
 /// GET /v1/policy: действующая политика, версия, автор и время.
-async fn get_policy(State(state): State<Arc<AppState>>) -> Json<Value> {
+async fn get_policy(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Err(e) = require_reader(&state, &headers) { return e; } // Только с токеном.
     let p = state.policy.load();
     let meta = state.store.policy_current();
     Json(json!({
@@ -225,22 +258,24 @@ async fn get_policy(State(state): State<Arc<AppState>>) -> Json<Value> {
         "updated_at": meta.as_ref().map(|m| m.updated_at.clone()),
         "updated_by": meta.as_ref().map(|m| m.updated_by.clone()),
         "comment": meta.as_ref().map(|m| m.comment.clone()).unwrap_or_default(),
-    }))
+    })).into_response()
 }
 
 /// GET /v1/policy/history: версии, новые сверху.
-async fn policy_history(State(state): State<Arc<AppState>>) -> Json<Value> {
-    Json(json!({"items": state.store.policy_history()}))
+async fn policy_history(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Err(e) = require_reader(&state, &headers) { return e; } // Только с токеном.
+    Json(json!({"items": state.store.policy_history()})).into_response()
 }
 
 #[derive(Deserialize)]
 struct PolicyBody { yaml: Option<String>, comment: Option<String> }
 
-/// POST /v1/policy/validate: проверка без применения, доступна всем.
-async fn validate_policy(Json(body): Json<PolicyBody>) -> Json<Value> {
+/// POST /v1/policy/validate: проверка без применения, с токеном админа или аудитора.
+async fn validate_policy(State(state): State<Arc<AppState>>, headers: HeaderMap, Json(body): Json<PolicyBody>) -> Response {
+    if let Err(e) = require_reader(&state, &headers) { return e; } // Только с токеном.
     match Policy::parse(body.yaml.as_deref().unwrap_or("")) {
-        Ok(_) => Json(json!({"valid": true, "errors": []})),
-        Err(errors) => Json(json!({"valid": false, "errors": errors})),
+        Ok(_) => Json(json!({"valid": true, "errors": []})).into_response(),
+        Err(errors) => Json(json!({"valid": false, "errors": errors})).into_response(),
     }
 }
 
@@ -345,7 +380,7 @@ async fn session_message(State(state): State<Arc<AppState>>, Path(id): Path<Stri
         "system_prompt": s.system_prompt, "history": history, "attachments": b.attachments,
     }});
     let (r, req) = match evaluate(&state, raw).await { Ok(x) => x, Err(e) => return e };
-    journal(&state, &r, &req, "session");
+    journal(&state, &r, &req, "session", true);
     let flagged: Vec<FlaggedTurn> = s.turns.iter().filter(|t| t.role == "user" && t.decision == Some(Decision::Block)).map(|t| FlaggedTurn { turn: t.index, reason: "заблокирована ранее".into() }).collect();
     let nums = flagged.iter().map(|f| format!("№{}", f.turn + 1)).collect::<Vec<_>>().join(", ");
     let note = if s.turns.is_empty() {
@@ -414,5 +449,20 @@ mod tests {
     fn request_hash_matches_frontend() {
         let raw = serde_json::json!({"user_prompt": "Перезапусти payments-api / \"prod\"", "context": {"user_role": "sre", "history": [{"role": "user", "content": "привет"}], "attachments": []}});
         assert_eq!(super::canonical_hash(&raw), "1ae38b7290194dab576a4445048a7be2de0a07ad181c75e29e7369dc275edb22");
+    }
+
+    #[test] // Сравнение токенов: равные совпадают, разные и разной длины нет.
+    fn token_compare() {
+        assert!(super::token_eq("abc123", "abc123")); // Совпадение.
+        assert!(!super::token_eq("abc123", "abc124")); // Последний символ другой.
+        assert!(!super::token_eq("abc", "abc123")); // Разная длина.
+    }
+
+    #[test] // Признак интерфейса: только заголовок X-Guard-Client: ui.
+    fn ui_header() {
+        let mut h = axum::http::HeaderMap::new(); // Пустые заголовки — внешний клиент.
+        assert!(!super::from_ui(&h)); // Без заголовка текст не хранится.
+        h.insert("x-guard-client", "UI".parse().unwrap()); // Регистр не важен.
+        assert!(super::from_ui(&h)); // Интерфейс.
     }
 }

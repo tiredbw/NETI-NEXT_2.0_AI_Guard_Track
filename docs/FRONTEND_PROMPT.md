@@ -102,11 +102,11 @@
 | `POST /v1/check` | `{user_prompt, context}` | `CheckResult`. Только оценка, ничего не передаёт. |
 | `POST /v1/demo/submit` | `{user_prompt, context}` | `{check: CheckResult, status: "forwarded" \| "blocked" \| "pending_confirmation", receipt: Receipt \| null, confirmation: {check_id, request_hash, user_id, expires_at} \| null}` |
 | `POST /v1/demo/confirm` | `{check_id, request_hash, user_id}` | `{status: "forwarded", receipt: Receipt}`. Ошибки: 403 `wrong_user`, 404 `not_found`, 409 `request_changed` или `already_used`, 410 `expired`. |
-| `GET /v1/agent/inbox?limit=50` | — | `{items: [Receipt]}`, новые сверху |
-| `GET /v1/journal` | `since`, `until` (ISO 8601), `decision`, `category`, `role`, `limit`, `offset` | `{items: [JournalEntry], total}` |
-| `GET /v1/policy` | — | `{version, updated_at, updated_by, comment, yaml}` |
-| `GET /v1/policy/history` | — | `{items: [{version, updated_at, updated_by, comment}]}` |
-| `POST /v1/policy/validate` | `{yaml}` | `{valid: bool, errors: [string]}` |
+| `GET /v1/agent/inbox?limit=50` | заголовок `X-Admin-Token` (админ или аудитор) | `{items: [Receipt]}`, новые сверху |
+| `GET /v1/journal` | `X-Admin-Token`; `since`, `until` (ISO 8601), `decision`, `category`, `role`, `limit`, `offset` | `{items: [JournalEntry], total}` |
+| `GET /v1/policy` | `X-Admin-Token` | `{version, updated_at, updated_by, comment, yaml}` |
+| `GET /v1/policy/history` | `X-Admin-Token` | `{items: [{version, updated_at, updated_by, comment}]}` |
+| `POST /v1/policy/validate` | `X-Admin-Token`; `{yaml}` | `{valid: bool, errors: [string]}` |
 | `PUT /v1/policy` | `{yaml, comment}` + заголовок `X-Admin-Token` | `{version, updated_at, updated_by}`. 401 без токена, 403 неверный токен, 422 `{error: "invalid_policy", errors: [...]}` |
 | `POST /v1/sessions` | `{user_id, user_name, user_role}` | `Session` |
 | `GET /v1/sessions?user_id=` | — | `{items: [Session без turns]}` — только сессии этого пользователя |
@@ -137,3 +137,9 @@
 - Подтверждение одноразовое, живёт 10 минут, принадлежит `user_id` из исходной проверки.
 - В журнале и во входящих агента текст маскируется: пароли, токены, ключи, приватные ключи заменяются на `[скрыто]`.
 - `policy_version` меняется при каждом применении политики.
+
+## Доступ и приватность журнала
+
+- Журнал, входящие агента и политика (чтение, проверка, изменение) закрыты заголовком `X-Admin-Token`. Админ (`ADMIN_TOKEN`) читает и меняет, аудитор (`AUDIT_TOKEN`) только читает. Без токена 401, с неверным 403.
+- Фронт ставит на все запросы `X-Guard-Client: ui`. Текст запроса (маскированный) и объяснение сохраняются в журнале только для таких запросов, демо и сессий.
+- Внешние вызовы `POST /v1/check` (например, тестовый клиент организаторов) пишутся в журнал без текста и объяснения: `prompt_masked: ""`, `text_stored: false`, остаются `request_hash`, решение, категория, правило политики и задержка.

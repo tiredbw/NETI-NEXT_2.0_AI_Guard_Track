@@ -30,6 +30,7 @@ async fn main() {
         policy_path: policy_path.into(), // Файл для перезагрузки.
         detector: detector.clone(), // Детектор.
         admin_token: std::env::var("ADMIN_TOKEN").ok().filter(|t| !t.is_empty()), // Токен админа из окружения.
+        audit_token: std::env::var("AUDIT_TOKEN").ok().filter(|t| !t.is_empty()), // Токен аудитора: только чтение.
         store: Store::new(journal_path), // Журнал, входящие агента, подтверждения, сессии.
         frontend_dir, // Каталог фронтенда; None — сервис отдаёт только API.
         cors_origins, // Origin отдельного dev-сервера фронта.

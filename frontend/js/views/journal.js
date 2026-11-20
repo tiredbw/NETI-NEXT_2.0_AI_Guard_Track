@@ -1,7 +1,7 @@
 // Вкладка «Журнал»: проверки с фильтрами по времени, решению, категории и роли.
 
-import { api, errorText } from '../api.js';
-import { h, clear, decisionBadge, riskBadge, fmtTime, fmtMs, busy, select, field } from '../ui.js';
+import { api, errorText, isAuthError, setAdminToken } from '../api.js';
+import { h, clear, tokenGate, decisionBadge, riskBadge, fmtTime, fmtMs, busy, select, field } from '../ui.js';
 import { ROLES } from '../data.js';
 import { ALL_CATEGORIES } from '../mock/policy.js';
 
@@ -9,6 +9,12 @@ const PAGE = 50;
 let els = {};
 let items = [], total = 0;
 const open = new Set();
+
+// Внешние вызовы /v1/check хранятся без текста: показываем пометку и начало хеша.
+function promptText(e) {
+  if (e.text_stored === false) return `текст не хранится (внешний /v1/check), sha256 ${String(e.request_hash || '').slice(0, 12)}…`;
+  return e.prompt_masked;
+}
 
 function toIso(local) { return local ? new Date(local).toISOString() : ''; }
 
@@ -33,7 +39,8 @@ async function load(append = false) {
     total = r.total;
     render();
   } catch (e) {
-    clear(els.body).append(h('div', { class: 'banner error' }, errorText(e)));
+    if (isAuthError(e)) clear(els.body).append(h('div', { class: 'banner error' }, errorText(e)), tokenGate((t) => { setAdminToken(t); load(); }));
+    else clear(els.body).append(h('div', { class: 'banner error' }, errorText(e)));
   } finally {
     busy(btn, false);
   }
@@ -62,11 +69,12 @@ function render() {
     h('td', { class: 'nowrap' }, riskBadge(e.risk_level, true)),
     h('td', { class: 'nowrap' }, fmtMs(e.latency_ms)),
     h('td', {}, h('code', {}, e.policy_version)),
-    h('td', { class: 'prompt' }, h('div', { class: 'clamp-2', title: e.prompt_masked }, e.prompt_masked))));
+    h('td', { class: 'prompt' }, h('div', { class: 'clamp-2', title: promptText(e) }, promptText(e)))));
     if (isOpen) {
       rows.push(h('tr', { class: 'details' }, h('td', { colspan: 9 },
         h('dl', { class: 'kv' },
-          h('dt', {}, 'Запрос'), h('dd', {}, e.prompt_masked),
+          h('dt', {}, 'Запрос'), h('dd', {}, promptText(e)),
+          e.request_hash ? h('dt', {}, 'Хеш запроса') : null, e.request_hash ? h('dd', {}, h('code', {}, e.request_hash)) : null,
           h('dt', {}, 'Объяснение'), h('dd', {}, e.explanation || '—'),
           h('dt', {}, 'ID проверки'), h('dd', {}, h('code', {}, e.check_id)),
           h('dt', {}, 'Источник'), h('dd', {}, { check: 'POST /v1/check', demo: 'демо-отправка агенту', session: 'сессия' }[e.source] || e.source || '—')))));

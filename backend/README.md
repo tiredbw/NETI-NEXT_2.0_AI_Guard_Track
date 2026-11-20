@@ -21,7 +21,8 @@ cargo run --release
 | `OLLAMA_MODEL` | `qwen3.5:4b` | Модель |
 | `DETECTOR_TIMEOUT_MS` | `8000` | Таймаут модели; при превышении `block` |
 | `GUARD_MODE` | `gpu` | Режим в `/health` |
-| `ADMIN_TOKEN` | не задан | Токен для `PUT /v1/policy` и `/v1/policy/reload` |
+| `ADMIN_TOKEN` | не задан | Токен администратора: изменение политики (`PUT /v1/policy`, `/v1/policy/reload`) и чтение журнала, входящих агента и политики |
+| `AUDIT_TOKEN` | не задан | Токен аудитора: только чтение журнала, входящих агента и политики. Без обоих токенов эти разделы закрыты |
 | `FRONTEND_DIR` | `../frontend` | Каталог интерфейса; сервис раздаёт его на `/`. Нет `index.html` — только API |
 | `JOURNAL_PATH` | `../data/journal.jsonl` | Журнал проверок в JSONL (только маскированный текст); пусто — только память |
 | `CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | Origin отдельного dev-сервера фронта; для демо с того же адреса не нужен |
