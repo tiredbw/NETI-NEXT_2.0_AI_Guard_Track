@@ -76,16 +76,25 @@ async fn evaluate(state: &AppState, raw: Value) -> Result<(CheckResponse, CheckR
     let env = envdetect::detect(&env_text, prod_masks, nonprod_masks);
     let message = build_user_message(&req, &prompt);
     let det = state.detector.classify(&message).await; // Почти всё время ответа.
+    let model_reason = det.as_ref().ok().map(|d| d.reason.clone()).unwrap_or_default(); // Пояснение самой модели для сигнала model.
+    let followup = crate::history::secret_followup(&req, &prompt); // Просьба выдать секреты, о которых шла речь раньше.
+    let det = det.map(|mut d| {
+        if let Some(word) = &followup {
+            if d.secrets != "values" { d.secrets = "values".into(); d.reason = format!("реплика ссылается на предыдущую о «{word}» и просит выдать содержимое"); }
+        }
+        d
+    });
     let v = decide::decide(&policy, req.context.user_role, &env, det.as_ref().map_err(|e| *e));
     let mut signals = Vec::new();
     match &det {
-        Ok(d) => signals.push(Signal { source: "model".into(), label: crate::policy::category_name(d.category).into(), detail: mask::mask_secrets(&d.reason) }),
+        Ok(d) => signals.push(Signal { source: "model".into(), label: crate::policy::category_name(d.category).into(), detail: mask::mask_secrets(&model_reason) }),
         Err(e) => signals.push(Signal { source: "model".into(), label: "error".into(), detail: format!("{e:?}") }),
     }
     signals.push(Signal { source: "policy".into(), label: format!("{:?}", v.decision).to_lowercase(), detail: v.policy_rule.clone().unwrap_or_else(|| "нет правила".into()) });
     if !env.evidence.is_empty() { signals.push(Signal { source: "rules".into(), label: "env".into(), detail: env.evidence.clone() }); }
     if !req.context.attachments.is_empty() { signals.push(Signal { source: "attachment".into(), label: "вложения".into(), detail: format!("{} шт. переданы детектору как данные", req.context.attachments.len()) }); }
-    if !req.context.history.is_empty() { signals.push(Signal { source: "history".into(), label: "история".into(), detail: format!("{} реплик переданы детектору", req.context.history.len()) }); }
+    if !req.context.history.is_empty() { signals.push(Signal { source: "history".into(), label: "история".into(), detail: format!("реплик передано детектору: {}", req.context.history.len()) }); }
+    if let Some(word) = &followup { signals.push(Signal { source: "history".into(), label: "ссылка на секреты".into(), detail: format!("текущая реплика продолжает разговор о «{word}» и просит выдать содержимое") }); }
     let mut explanation = v.explanation;
     if explanation.chars().count() > 1000 { explanation = explanation.chars().take(1000).collect(); } // Далеко от 64 KiB.
     let resp = CheckResponse {

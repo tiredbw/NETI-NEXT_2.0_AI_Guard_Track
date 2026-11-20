@@ -5,6 +5,7 @@ pub mod contract; // JSON-контракт.
 pub mod decide; // Сведение решения.
 pub mod detector; // Клиент Qwen через Ollama.
 pub mod envdetect; // Окружение по тексту.
+pub mod history; // Опасные просьбы, разбитые на несколько реплик.
 pub mod mask; // Маскирование секретов.
 pub mod normalize; // Нормализация текста.
 pub mod policy; // YAML-политика.
