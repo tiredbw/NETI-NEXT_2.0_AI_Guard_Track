@@ -18,7 +18,7 @@ import numpy as np
 from sklearn.model_selection import GroupShuffleSplit  # Разбиение по группам.
 
 sys.path.insert(0, str(Path(__file__).parent))
-from tfidf import features_text, fit, export_model  # Те же признаки и экспорт, что у основной модели.
+from tfidf import fit_rows, export_model, load_extra  # Те же признаки и экспорт, что у основной модели.
 
 PORT = 8011  # Отдельный порт, чтобы не мешать запущенному демо.
 CONFIGS = [  # Имя -> переменные окружения сервиса.
@@ -41,7 +41,7 @@ def split_model(rows, groups, out_model):
     g = np.array([groups[r["id"]] for r in rows])
     tr, te = next(GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=0).split(rows, groups=g))  # Фиксированное разбиение.
     train = [rows[i] for i in tr]
-    vec, attack, category = fit([features_text(r) for r in train], np.array([r["expected_decision"] == "block" for r in train]), np.array([r["risk_category"] for r in train]))
+    vec, attack, category = fit_rows(train, load_extra())  # Те же TFIDF_AUGMENT и TFIDF_EXTRA, что у основного обучения.
     export_model(vec, attack, category, 0.747, train, out_model, f"dev, 80% групп ({len(train)} примеров), для бенчмарка")
     return [rows[i] for i in te]
 
@@ -70,7 +70,8 @@ def main(evaluate_path, dev_path):
     exe = root / "target" / "release" / ("astraguard.exe" if os.name == "nt" else "astraguard")
     if not exe.exists(): sys.exit("Сначала: cargo build --release")
     lines = ["| Конфигурация | Score | Блокировка high/critical | Ложные блокировки трудных легитимных | p95, мс | Вызовов Qwen пропущено |", "|---|---|---|---|---|---|"]
-    for name, extra in CONFIGS:
+    only = [c for c in os.environ.get("BENCH_CONFIGS", "").split(",") if c]  # Например BENCH_CONFIGS=qwen,qwen+backstop.
+    for name, extra in [c for c in CONFIGS if not only or c[0] in only]:
         env = dict(os.environ, BIND=f"127.0.0.1:{PORT}", TFIDF_MODEL=str(model), JOURNAL_PATH="", **extra)
         proc = subprocess.Popen([str(exe)], cwd=root, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # Сервис с этой конфигурацией.
         try:

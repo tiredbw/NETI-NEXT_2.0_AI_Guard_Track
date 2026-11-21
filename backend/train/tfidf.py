@@ -9,12 +9,14 @@
 Признаки строятся только из входа API: роль, запрос, вложения, история (как features_text в Rust).
 Запуск: python backend/train/tfidf.py <dev.jsonl> <groups.json> <out.json> [validation.jsonl]
 """
-import json, sys
+import json, os, sys
 from pathlib import Path
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer  # Символьные n-граммы.
 from sklearn.linear_model import LogisticRegression  # Линейный классификатор.
 from sklearn.model_selection import GroupKFold  # Разбиение с учётом групп.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from augment import augment  # Вариации обучающих примеров.
 
 
 VEC = dict(analyzer="char_wb", ngram_range=(1, 4), lowercase=True, sublinear_tf=True, min_df=2, max_features=40000)  # Настройки векторизации; повторены в Rust.
@@ -31,14 +33,38 @@ def features_text(row):
     return "\n".join(parts)
 
 
-def fit(texts, is_attack, labels):
-    """Один словарь, две модели: вероятность атаки и категория среди атак."""
+AUGMENT = int(os.environ.get("TFIDF_AUGMENT", "0"))  # Вариантов на каждый обучающий пример (augment.py).
+EXTRA_WEIGHT = float(os.environ.get("TFIDF_EXTRA_WEIGHT", "0.3"))  # Вес внешних примеров относительно dev.
+
+
+def load_extra():
+    """Внешние наборы из TFIDF_EXTRA (через запятую): JSONL с полями text и label (1 — атака, 0 — нет)."""
+    out = []
+    for path in filter(None, os.environ.get("TFIDF_EXTRA", "").split(",")):
+        for line in open(path, encoding="utf-8"):
+            r = json.loads(line)
+            out.append((str(r["text"]), bool(int(r["label"]))))
+    return out
+
+
+def fit(texts, is_attack, labels, extra=()):
+    """Один словарь, две модели: вероятность атаки и категория среди атак.
+    Внешние примеры (extra) идут только в модель «атака или нет» и с меньшим весом."""
     vec = TfidfVectorizer(**VEC)
-    X = vec.fit_transform(texts)
-    attack = LogisticRegression(C=C_ATTACK, max_iter=3000, class_weight="balanced").fit(X, is_attack)
+    X = vec.fit_transform(list(texts) + ["role developer\n" + t for t, _ in extra])  # Словарь по всем текстам.
+    n = len(texts)
+    y = np.concatenate([is_attack, np.array([a for _, a in extra], dtype=bool)])
+    w = np.concatenate([np.ones(n), np.full(len(extra), EXTRA_WEIGHT)])
+    attack = LogisticRegression(C=C_ATTACK, max_iter=3000, class_weight="balanced").fit(X, y, sample_weight=w)
     idx = np.where(is_attack)[0]
-    category = LogisticRegression(C=C_CATEGORY, max_iter=3000).fit(X[idx], labels[idx])
+    category = LogisticRegression(C=C_CATEGORY, max_iter=3000).fit(X[idx], labels[idx])  # Категории — только по dev.
     return vec, attack, category
+
+
+def fit_rows(rows, extra=()):
+    """Обучение по примерам dev с размножением вариациями (только обучающая часть)."""
+    rows = augment(rows, AUGMENT)
+    return fit([features_text(r) for r in rows], np.array([r["expected_decision"] == "block" for r in rows]), np.array([r["risk_category"] for r in rows]), extra)
 
 
 def export_model(vec, attack, category, threshold, rows, out_path, trained_on):
@@ -69,10 +95,12 @@ def main(dev_path, groups_path, out_path, val_path=None):
     labels = np.array([r["risk_category"] for r in rows])
     is_attack = np.array([r["expected_decision"] == "block" for r in rows])  # Атака: ожидается block.
     g = np.array([groups[r["id"]] for r in rows])
+    extra = load_extra()  # Внешние наборы, если заданы.
+    print(f"Размножение: {AUGMENT} вариантов на пример; внешних примеров: {len(extra)} с весом {EXTRA_WEIGHT}")
 
     oof = np.zeros(len(rows)); oof_cat = np.empty(len(rows), dtype=object)
     for tr, te in GroupKFold(n_splits=5).split(texts, labels, g):  # Похожие примеры не делятся между частями.
-        vec, attack, category = fit([texts[i] for i in tr], is_attack[tr], labels[tr])
+        vec, attack, category = fit_rows([rows[i] for i in tr], extra)
         X = vec.transform([texts[i] for i in te])
         oof[te] = attack.predict_proba(X)[:, 1]
         oof_cat[te] = category.predict(X)
@@ -90,7 +118,7 @@ def main(dev_path, groups_path, out_path, val_path=None):
         if not r["expected_decision"] == "block" and p >= threshold - 0.05:
             print(f"  легитимный p={p:.2f} {r['context']['user_role']}: {r['user_prompt'][:100]!r}")
 
-    vec, attack, category = fit(texts, is_attack, labels)  # Финальная модель на всём dev.
+    vec, attack, category = fit_rows(rows, extra)  # Финальная модель на всём dev.
     if val_path:  # Свой набор: не участвовал ни в обучении, ни в выборе порога.
         val = [json.loads(l) for l in open(val_path, encoding="utf-8")]
         pv = attack.predict_proba(vec.transform([features_text(r) for r in val]))[:, 1]
