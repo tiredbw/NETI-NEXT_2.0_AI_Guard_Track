@@ -42,7 +42,7 @@ pub enum DetectorError {
 #[derive(Debug, Clone)] // Копируется в состояние приложения.
 pub struct OllamaConfig {
     pub url: String, // Адрес Ollama, например http://127.0.0.1:11434.
-    pub model: String, // Имя модели, например qwen3.5:4b.
+    pub model: String, // Имя модели в Ollama: дообученная astraguard-ft или базовая qwen3.5:4b.
     pub timeout: Duration, // Общий таймаут вызова; меньше 10 с лимита кейса.
 }
 
@@ -51,7 +51,7 @@ impl OllamaConfig {
     pub fn from_env() -> Self {
         Self {
             url: std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".into()), // Локальная Ollama по умолчанию.
-            model: std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "qwen3.5:4b".into()), // Модель по умолчанию.
+            model: std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "astraguard-ft".into()), // По умолчанию дообученная модель (backend/models/Modelfile); базовая — OLLAMA_MODEL=qwen3.5:4b.
             timeout: Duration::from_millis(std::env::var("DETECTOR_TIMEOUT_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(8000)), // 8 с с запасом до 10 с.
         }
     }
@@ -149,12 +149,12 @@ pub fn build_user_message_within(req: &CheckRequest, normalized_prompt: &str, bu
     }
     let attachments: Vec<_> = ctx.attachments.iter().take(4).collect(); // Не больше четырёх вложений.
     let att_total = if ctx.history.is_empty() { left } else { left * 3 / 5 }; // Вложениям до 60% остатка, если есть история.
-    let att_parts: Vec<String> = attachments.iter().map(|a| clip(&a.content, 3000.min(att_total / attachments.len().max(1)))).collect(); // Поровну на вложение.
+    let att_parts: Vec<String> = attachments.iter().map(|a| clip(&crate::normalize::clean(&a.content), 3000.min(att_total / attachments.len().max(1)))).collect(); // Поровну на вложение, без невидимых символов.
     left = left.saturating_sub(att_parts.iter().map(|p| p.chars().count()).sum::<usize>());
     let mut history = Vec::new(); // Реплики от свежих к старым, пока хватает места.
     for turn in ctx.history.iter().rev().take(8) { // Последние 8 реплик.
         if left < 80 { break; } // Места почти нет — старые реплики не берём.
-        let part = clip(&turn.content, 1500.min(left)); // Реплика в пределах остатка.
+        let part = clip(&crate::normalize::clean(&turn.content), 1500.min(left)); // Реплика в пределах остатка, без невидимых символов.
         left = left.saturating_sub(part.chars().count());
         history.push((turn.role.clone(), part));
     }
@@ -167,6 +167,21 @@ pub fn build_user_message_within(req: &CheckRequest, normalized_prompt: &str, bu
     }
     for (a, part) in attachments.iter().zip(&att_parts) { // Вложения после истории, как раньше.
         out.push_str(&format!("<attachment name=\"{}\">\n{part}\n</attachment>\n", a.name.as_deref().unwrap_or("без имени"))); // Имя и текст вложения.
+    }
+    // Скрытый текст во вложениях и в последних репликах пользователя (base64, теги, hex и т.п.):
+    // показываем модели раскодированным, но коротко, чтобы не раздувать контекст и задержку.
+    let names = attachments.iter().map(|a| a.name.as_deref().unwrap_or("без имени").to_string()); // Имена вложений.
+    let att_texts = attachments.iter().map(|a| a.content.as_str()).zip(names).map(|(t, n)| (t, format!("attachment:{n}"))); // Вложения.
+    let hist_texts = ctx.history.iter().rev().filter(|t| t.role == "user").take(2).map(|t| (t.content.as_str(), "history".to_string())); // Две последние реплики пользователя.
+    let mut extra = 0; // Сколько вариантов уже добавили.
+    for (text, source) in att_texts.chain(hist_texts) { // Каждый источник.
+        for (kind, decoded) in crate::normalize::hidden_variants(text).into_iter().take(2) { // Не больше двух вариантов на источник.
+            if extra >= 4 || left < 200 { break; } // Общий предел: четыре варианта и остаток бюджета.
+            let part = clip(&decoded, 600.min(left / 2)); // Коротко.
+            left = left.saturating_sub(part.chars().count());
+            out.push_str(&format!("<decoded kind=\"{kind}\" source=\"{source}\">\n{part}\n</decoded>\n")); // Раскодированный текст с указанием источника.
+            extra += 1;
+        }
     }
     out // Готовое сообщение.
 }

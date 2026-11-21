@@ -98,18 +98,43 @@ async fn evaluate(state: &AppState, raw: Value) -> Result<(CheckResponse, CheckR
         env_text.push_str(&hidden);
     }
     let env = envdetect::detect(&env_text, prod_masks, nonprod_masks);
-    let message = build_user_message(&req, &prompt);
-    let det = state.detector.classify(&message).await; // Почти всё время ответа.
+    let variants = normalize::hidden_variants(&req.user_prompt); // Раскодированные варианты запроса.
+    let tf = state.tfidf.as_ref().map(|t| (t.score(&req, &variants), t.threshold, t.backstop)); // TF-IDF до Qwen: микросекунды.
+    let blockable = |c: crate::contract::RiskCategory| { // Категория, которую политика блокирует.
+        let name = crate::policy::category_name(c);
+        policy.always_blocks(c) || policy.file.context_dependent.iter().any(|x| x == name)
+    };
+    // Быстрый фильтр (TFIDF_PREFILTER): уверенная атака блокируется без вызова Qwen.
+    let prefiltered = match (state.tfidf.as_ref().and_then(|t| t.prefilter), tf) {
+        (Some(limit), Some((s, _, _))) if s.p_attack >= limit && blockable(s.category) => Some(s),
+        _ => None,
+    };
+    let det = if let Some(s) = prefiltered {
+        Ok(crate::detector::DetectorOut { category: s.category, risk_level: crate::contract::RiskLevel::High, tool: None, forbidden_action: None, action: "execute".into(), secrets: "none".into(),
+            reason: format!("Qwen не вызывался: быстрый фильтр TF-IDF уверен в атаке (p={:.2}).", s.p_attack) })
+    } else {
+        let mut message = build_user_message(&req, &prompt);
+        if let (Some(true), Some((s, _, _))) = (state.tfidf.as_ref().map(|t| t.hint), tf) { // Подсказка классификатора для Qwen (TFIDF_HINT).
+            message.push_str(&format!("<classifier p_attack=\"{:.2}\" category=\"{}\">Оценка независимого классификатора по словам. Он часто ошибается на вопросах и учебных запросах, решай по смыслу.</classifier>\n", s.p_attack, crate::policy::category_name(s.category)));
+        }
+        state.detector.classify(&message).await // Почти всё время ответа.
+    };
     let model_reason = det.as_ref().ok().map(|d| d.reason.clone()).unwrap_or_default(); // Пояснение самой модели для сигнала model.
     let followup = crate::history::secret_followup(&req, &prompt); // Просьба выдать секреты, о которых шла речь раньше.
-    let variants = normalize::hidden_variants(&req.user_prompt); // Раскодированные варианты запроса.
     let rule_hit = crate::rules::check(&prompt, &variants, req.context.user_role); // Детерминированные правила.
-    let tf = state.tfidf.as_ref().map(|t| (t.score(&req, &variants), t.threshold, t.backstop)); // Второй сигнал, микросекунды.
+    let mut inferred_tool: Option<&'static str> = None; // Инструмент, найденный правилами вместо Qwen.
     let det = det.map(|mut d| {
         if let Some(word) = &followup {
             if d.secrets != "values" { d.secrets = "values".into(); d.reason = format!("реплика ссылается на предыдущую о «{word}» и просит выдать содержимое"); }
         }
         if let Some(hit) = &rule_hit { crate::rules::apply(&mut d, hit); } // Правила только усиливают ответ модели.
+        let weak = matches!(d.category, crate::contract::RiskCategory::None | crate::contract::RiskCategory::SensitiveAction); // Атаки модель не увидела.
+        if weak && (d.tool.is_none() || d.action == "ask") { // Qwen не назвал инструмент или счёл просьбу вопросом («требует уточнения»), а текст — явная просьба действия.
+            if let Some(t) = crate::rules::infer_tool(&prompt).filter(|t| env.env != crate::contract::Env::Unknown || (*t == "delete_resource" && crate::rules::names_infra(&prompt))) { // Без окружения — только удаление названного ресурса.
+                if d.tool.is_none() { d.tool = Some(t.into()); } // Инструмент модели, если назван, остаётся.
+                d.action = "execute".into(); inferred_tool = Some(t); // Дальше обычная матрица прав из YAML.
+            }
+        }
         d
     });
     let mut v = decide::decide(&policy, req.context.user_role, &env, det.as_ref().map_err(|e| *e));
@@ -124,8 +149,8 @@ async fn evaluate(state: &AppState, raw: Value) -> Result<(CheckResponse, CheckR
     }
     if let (Some((s, threshold, true)), Ok(_)) = (tf, &det) {
         let cat = crate::policy::category_name(s.category); // Категория по классификатору.
-        let blockable = policy.always_blocks(s.category) || policy.file.context_dependent.iter().any(|c| c == cat); // Категория блокируется политикой.
-        if v.decision == Decision::Allow && s.p_attack >= threshold && blockable { // Qwen пропустил, классификатор уверен.
+        let skip = crate::rules::backstop_skip(&prompt, !req.context.attachments.is_empty(), !req.context.history.is_empty(), !variants.is_empty(), s.category); // «Объясни», «не меняя ничего», инъекция без вложений.
+        if v.decision == Decision::Allow && s.p_attack >= threshold && blockable(s.category) && !skip { // Qwen пропустил, классификатор уверен.
             v.decision = Decision::Block;
             v.risk_level = crate::contract::RiskLevel::High;
             v.risk_category = s.category;
@@ -135,11 +160,12 @@ async fn evaluate(state: &AppState, raw: Value) -> Result<(CheckResponse, CheckR
     }
     let mut signals = Vec::new();
     match &det {
-        Ok(d) => signals.push(Signal { source: "model".into(), label: crate::policy::category_name(d.category).into(), detail: mask::mask_secrets(&model_reason) }),
+        Ok(d) => signals.push(Signal { source: "model".into(), label: if prefiltered.is_some() { "skipped".into() } else { crate::policy::category_name(d.category).into() }, detail: mask::mask_secrets(&model_reason) }),
         Err(e) => signals.push(Signal { source: "model".into(), label: "error".into(), detail: format!("{e:?}") }),
     }
     if let Some((s, threshold, _)) = tf { signals.push(Signal { source: "tfidf".into(), label: crate::policy::category_name(s.category).into(), detail: format!("p(атака)={:.2}, порог {:.2}", s.p_attack, threshold) }); }
     if let Some(hit) = &rule_hit { signals.push(Signal { source: "rules".into(), label: hit.rule.into(), detail: hit.detail.into() }); }
+    if let Some(t) = inferred_tool { signals.push(Signal { source: "rules".into(), label: "rules.tool_from_verb".into(), detail: format!("модель не назвала инструмент, по глаголу просьбы это {t}") }); }
     signals.push(Signal { source: "policy".into(), label: format!("{:?}", v.decision).to_lowercase(), detail: v.policy_rule.clone().unwrap_or_else(|| "нет правила".into()) });
     if !env.evidence.is_empty() { signals.push(Signal { source: "rules".into(), label: "env".into(), detail: env.evidence.clone() }); }
     if !req.context.attachments.is_empty() { signals.push(Signal { source: "attachment".into(), label: "вложения".into(), detail: format!("{} шт. переданы детектору как данные", req.context.attachments.len()) }); }
@@ -251,7 +277,7 @@ async fn agent_inbox(State(state): State<Arc<AppState>>, headers: HeaderMap, Que
 // ---------- журнал ----------
 
 #[derive(Deserialize)]
-struct JournalQuery { since: Option<String>, until: Option<String>, decision: Option<String>, category: Option<String>, role: Option<String>, limit: Option<usize>, offset: Option<usize> }
+struct JournalQuery { since: Option<String>, until: Option<String>, decision: Option<String>, category: Option<String>, role: Option<String>, user_id: Option<String>, limit: Option<usize>, offset: Option<usize> }
 
 /// GET /v1/journal: фильтры по времени, решению, категории и роли.
 async fn journal_list(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<JournalQuery>) -> Response {
@@ -264,8 +290,27 @@ async fn journal_list(State(state): State<Arc<AppState>>, headers: HeaderMap, Qu
             && q.decision.as_deref().is_none_or(|d| d.is_empty() || json_name(&e.decision) == d)
             && q.category.as_deref().is_none_or(|c| c.is_empty() || json_name(&e.risk_category) == c)
             && q.role.as_deref().is_none_or(|r| r.is_empty() || json_name(&e.user_role) == r)
+            && q.user_id.as_deref().is_none_or(|u| u.is_empty() || e.user_id.as_deref() == Some(u)) // Фильтр по пользователю.
     }, q.offset.unwrap_or(0), q.limit.unwrap_or(50).min(500));
     Json(json!({"items": items, "total": total})).into_response()
+}
+
+/// GET /v1/users/{user_id}/history: история запросов пользователя для аудитора.
+/// Только чтение журнала: на решения /v1/check история пользователя не влияет (проверки по кейсу независимы).
+async fn user_history(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(user_id): Path<String>, Query(q): Query<JournalQuery>) -> Response {
+    if let Err(e) = require_reader(&state, &headers) { return e; } // Только с токеном.
+    let (all, total) = state.store.journal_query(|e| e.user_id.as_deref() == Some(user_id.as_str()), 0, usize::MAX); // Все записи пользователя, свежие первыми.
+    let mut by_decision: std::collections::BTreeMap<String, usize> = Default::default(); // Сколько allow/confirm/block.
+    let mut by_category: std::collections::BTreeMap<String, usize> = Default::default(); // Категории атак.
+    for e in &all {
+        *by_decision.entry(json_name(&e.decision)).or_default() += 1;
+        if e.risk_category != crate::contract::RiskCategory::None && e.risk_category != crate::contract::RiskCategory::SensitiveAction { *by_category.entry(json_name(&e.risk_category)).or_default() += 1; }
+    }
+    let hour_ago = store::iso_from(unix_now().saturating_sub(3600), 0); // Граница последнего часа.
+    let blocks_last_hour = all.iter().filter(|e| e.decision == Decision::Block && e.ts.as_str() >= hour_ago.as_str()).count(); // Недавние блокировки.
+    let items: Vec<_> = all.into_iter().skip(q.offset.unwrap_or(0)).take(q.limit.unwrap_or(50).min(500)).collect(); // Страница истории.
+    Json(json!({"user_id": user_id, "total": total, "by_decision": by_decision, "attack_categories": by_category,
+        "blocks_last_hour": blocks_last_hour, "items": items})).into_response()
 }
 
 /// Имя enum так, как оно выглядит в JSON (snake_case).
@@ -457,6 +502,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/demo/confirm", post(demo_confirm))
         .route("/v1/agent/inbox", get(agent_inbox))
         .route("/v1/journal", get(journal_list))
+        .route("/v1/users/{user_id}/history", get(user_history))
         .route("/v1/policy", get(get_policy).put(put_policy))
         .route("/v1/policy/validate", post(validate_policy))
         .route("/v1/policy/history", get(policy_history))

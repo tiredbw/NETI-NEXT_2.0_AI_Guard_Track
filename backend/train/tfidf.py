@@ -9,12 +9,14 @@
 Признаки строятся только из входа API: роль, запрос, вложения, история (как features_text в Rust).
 Запуск: python backend/train/tfidf.py <dev.jsonl> <groups.json> <out.json> [validation.jsonl]
 """
-import json, sys
+import json, os, sys
 from pathlib import Path
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer  # Символьные n-граммы.
 from sklearn.linear_model import LogisticRegression  # Линейный классификатор.
 from sklearn.model_selection import GroupKFold  # Разбиение с учётом групп.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from augment import augment  # Вариации обучающих примеров.
 
 
 VEC = dict(analyzer="char_wb", ngram_range=(1, 4), lowercase=True, sublinear_tf=True, min_df=2, max_features=40000)  # Настройки векторизации; повторены в Rust.
@@ -31,14 +33,70 @@ def features_text(row):
     return "\n".join(parts)
 
 
-def fit(texts, is_attack, labels):
-    """Один словарь, две модели: вероятность атаки и категория среди атак."""
+AUGMENT = int(os.environ.get("TFIDF_AUGMENT", "0"))  # Вариантов на каждый обучающий пример (augment.py).
+EXTRA_WEIGHT = float(os.environ.get("TFIDF_EXTRA_WEIGHT", "0.3"))  # Вес внешних примеров относительно dev.
+SYNTH_WEIGHT = float(os.environ.get("TFIDF_SYNTH_WEIGHT", "1.0"))  # Вес своих примеров synth.py относительно dev.
+
+
+def load_synth():
+    """Свои примеры в формате dev из TFIDF_SYNTH (synth.py). Идут в обе модели, но только в обучение.
+    По умолчанию train/synth.v1.jsonl, как у модели в репозитории; TFIDF_SYNTH= (пусто) выключает."""
+    path = os.environ.get("TFIDF_SYNTH", str(Path(__file__).with_name("synth.v1.jsonl")))
+    return [json.loads(l) for l in open(path, encoding="utf-8")] if path else []
+
+
+def load_extra():
+    """Внешние наборы из TFIDF_EXTRA (через запятую): JSONL с полями text и label (1 — атака, 0 — нет)."""
+    out = []
+    for path in filter(None, os.environ.get("TFIDF_EXTRA", "").split(",")):
+        for line in open(path, encoding="utf-8"):
+            r = json.loads(line)
+            out.append((str(r["text"]), bool(int(r["label"]))))
+    return out
+
+
+def fit(texts, is_attack, labels, extra=(), weights=None):
+    """Один словарь, две модели: вероятность атаки и категория среди атак.
+    Внешние примеры (extra) идут только в модель «атака или нет» и с меньшим весом."""
     vec = TfidfVectorizer(**VEC)
-    X = vec.fit_transform(texts)
-    attack = LogisticRegression(C=C_ATTACK, max_iter=3000, class_weight="balanced").fit(X, is_attack)
+    X = vec.fit_transform(list(texts) + ["role developer\n" + t for t, _ in extra])  # Словарь по всем текстам.
+    n = len(texts)
+    y = np.concatenate([is_attack, np.array([a for _, a in extra], dtype=bool)])
+    base = np.ones(n) if weights is None else np.asarray(weights, dtype=float)  # Веса примеров dev и своих.
+    w = np.concatenate([base, np.full(len(extra), EXTRA_WEIGHT)])
+    attack = LogisticRegression(C=C_ATTACK, max_iter=3000, class_weight="balanced").fit(X, y, sample_weight=w)
     idx = np.where(is_attack)[0]
-    category = LogisticRegression(C=C_CATEGORY, max_iter=3000).fit(X[idx], labels[idx])
+    category = LogisticRegression(C=C_CATEGORY, max_iter=3000).fit(X[idx], labels[idx], sample_weight=base[idx])  # Категории — по dev и своим примерам.
     return vec, attack, category
+
+
+def fit_rows(rows, extra=(), synth=()):
+    """Обучение по примерам dev с размножением вариациями (только обучающая часть) и своими примерами synth."""
+    rows = augment(rows, AUGMENT)
+    w = [1.0] * len(rows) + [SYNTH_WEIGHT] * len(synth)  # Свои примеры со своим весом.
+    rows = rows + list(synth)
+    return fit([features_text(r) for r in rows], np.array([r["expected_decision"] == "block" for r in rows]), np.array([r["risk_category"] for r in rows]), extra, w)
+
+
+def export_model(vec, attack, category, threshold, rows, out_path, trained_on):
+    """Пишет модель в JSON для Rust; контрольные примеры Rust сверяет при загрузке."""
+    export = {
+        "format": "astraguard-tfidf-1",
+        "analyzer": VEC["analyzer"], "ngram_range": list(VEC["ngram_range"]), "lowercase": True, "sublinear_tf": True,
+        "threshold": round(threshold, 4),
+        "vocabulary": {term: int(i) for term, i in vec.vocabulary_.items()}, "idf": [round(float(x), 6) for x in vec.idf_],
+        "attack_coef": [round(float(x), 6) for x in attack.coef_[0]], "attack_intercept": round(float(attack.intercept_[0]), 6),
+        "categories": list(category.classes_),
+        "category_coef": [[round(float(x), 6) for x in row] for row in category.coef_], "category_intercept": [round(float(x), 6) for x in category.intercept_],
+        "trained_on": trained_on, "cv": "GroupKFold(5) по группам groups.py, порог: не больше 1 ложной блокировки вне обучения",
+    }
+    controls = []
+    for r in rows[:5]:
+        X = vec.transform([features_text(r)])
+        controls.append({"text": features_text(r), "p_attack": round(float(attack.predict_proba(X)[0, 1]), 6), "category": str(category.predict(X)[0])})
+    export["controls"] = controls
+    json.dump(export, open(out_path, "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
+    return controls
 
 
 def main(dev_path, groups_path, out_path, val_path=None):
@@ -48,10 +106,13 @@ def main(dev_path, groups_path, out_path, val_path=None):
     labels = np.array([r["risk_category"] for r in rows])
     is_attack = np.array([r["expected_decision"] == "block" for r in rows])  # Атака: ожидается block.
     g = np.array([groups[r["id"]] for r in rows])
+    extra = load_extra()  # Внешние наборы, если заданы.
+    synth = load_synth()  # Свои примеры, если заданы.
+    print(f"Размножение: {AUGMENT} вариантов на пример; внешних примеров: {len(extra)} с весом {EXTRA_WEIGHT}; своих: {len(synth)} с весом {SYNTH_WEIGHT}")
 
     oof = np.zeros(len(rows)); oof_cat = np.empty(len(rows), dtype=object)
     for tr, te in GroupKFold(n_splits=5).split(texts, labels, g):  # Похожие примеры не делятся между частями.
-        vec, attack, category = fit([texts[i] for i in tr], is_attack[tr], labels[tr])
+        vec, attack, category = fit_rows([rows[i] for i in tr], extra, synth)  # Свои примеры только в обучении.
         X = vec.transform([texts[i] for i in te])
         oof[te] = attack.predict_proba(X)[:, 1]
         oof_cat[te] = category.predict(X)
@@ -69,29 +130,14 @@ def main(dev_path, groups_path, out_path, val_path=None):
         if not r["expected_decision"] == "block" and p >= threshold - 0.05:
             print(f"  легитимный p={p:.2f} {r['context']['user_role']}: {r['user_prompt'][:100]!r}")
 
-    vec, attack, category = fit(texts, is_attack, labels)  # Финальная модель на всём dev.
+    vec, attack, category = fit_rows(rows, extra, synth)  # Финальная модель на всём dev и своих примерах.
     if val_path:  # Свой набор: не участвовал ни в обучении, ни в выборе порога.
         val = [json.loads(l) for l in open(val_path, encoding="utf-8")]
         pv = attack.predict_proba(vec.transform([features_text(r) for r in val]))[:, 1]
         va = np.array([r["expected_decision"] == "block" for r in val])
         print(f"Свой набор ({len(val)}): атак поймано {(pv[va] >= threshold).sum()}/{va.sum()}, ложных {(pv[~va] >= threshold).sum()}/{(~va).sum()}")
 
-    export = {
-        "format": "astraguard-tfidf-1",
-        "analyzer": VEC["analyzer"], "ngram_range": list(VEC["ngram_range"]), "lowercase": True, "sublinear_tf": True,
-        "threshold": round(threshold, 4),
-        "vocabulary": {term: int(i) for term, i in vec.vocabulary_.items()}, "idf": [round(float(x), 6) for x in vec.idf_],
-        "attack_coef": [round(float(x), 6) for x in attack.coef_[0]], "attack_intercept": round(float(attack.intercept_[0]), 6),
-        "categories": list(category.classes_),
-        "category_coef": [[round(float(x), 6) for x in row] for row in category.coef_], "category_intercept": [round(float(x), 6) for x in category.intercept_],
-        "trained_on": "public dev.jsonl (500 примеров)", "cv": "GroupKFold(5) по группам groups.py, порог: не больше 1 ложной блокировки вне обучения",
-    }
-    controls = []  # Контрольные примеры: Rust при загрузке сверяет свои вероятности с этими.
-    for r in rows[:5]:
-        X = vec.transform([features_text(r)])
-        controls.append({"text": features_text(r), "p_attack": round(float(attack.predict_proba(X)[0, 1]), 6), "category": str(category.predict(X)[0])})
-    export["controls"] = controls
-    json.dump(export, open(out_path, "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
+    controls = export_model(vec, attack, category, threshold, rows, out_path, "public dev.jsonl (500 примеров)")
     oof_path = str(Path(out_path).resolve().parents[2] / "eval" / "tfidf_oof_dev.json")  # Оценки вне обучения для честной симуляции страховки на прогонах Qwen.
     json.dump({r["id"]: {"p_attack": round(float(p), 6), "category": str(c)} for r, p, c in zip(rows, oof, oof_cat)}, open(oof_path, "w", encoding="utf-8"), ensure_ascii=False)
     print("контроль:", [(c["p_attack"], c["category"]) for c in controls], "; оценки вне обучения:", oof_path)
