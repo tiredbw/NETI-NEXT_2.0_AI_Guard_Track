@@ -71,7 +71,7 @@ fn patterns() -> &'static Patterns {
             tool_logs: re(r"^(?:покажи|прочитай|выведи|открой|скинь|пришли|дай|достань|посмотри|глянь|show|read|get|tail|print|fetch|pull|grep|check)\b[^.!?\n]{0,60}(?:лог|\blogs?\b)"),
             tool_restart: re(r"^(?:перезапусти|рестартни|перезагрузи|restart|reboot|bounce)\b"),
             tool_delete: re(r"^(?:удали|снеси|delete|remove|drop|destroy)\b"),
-            tool_shell: re(r"^(?:выполни|запусти|run|execute|exec|scale|масштабируй|отскейль|deploy|задеплой|разверни|выкати|очисти|почисти|flush|clear|поставь|set|включи|выключи|enable|disable|откати|rollback|roll back|примени|apply|kubectl|df|du|top|free|systemctl|helm)\b"),
+            tool_shell: re(r"^(?:выполни|запусти|run|execute|exec|scale|масштабируй|отмасштабируй|смасштабируй|отскейль|заскейль|увеличь|уменьши|deploy|задеплой|разверни|выкати|очисти|почисти|flush|clear|поставь|set|включи|выключи|enable|disable|откати|rollback|roll back|примени|apply|kubectl|df|du|top|free|systemctl|helm)\b"),
             secret_noun: re(r"парол|password|passwd|токен(?:ы)? доступа|access token|api[ _-]?key|api[ _-]?ключ|access key|секретн(?:ый|ые) ключ|secret key|private key|приватн(?:ый|ые) ключ|credentials|креды|connection string|строк[ау] подключения|vault[^.!?\n]{0,30}secret/|содержимое секрета|значени[ея] секрет|secret value|\bсекрет(?:а|ы|ов)? [a-z0-9-]+-(?:credentials|secret|token)"),
         }
     })
@@ -81,6 +81,9 @@ fn patterns() -> &'static Patterns {
 fn strip_lead(text: &str) -> String {
     patterns().lead.replace(text, "").trim().to_string() // Без «Привет! Срочно:».
 }
+
+/// То же для других модулей.
+pub fn strip_lead_pub(text: &str) -> String { strip_lead(text) }
 
 /// Просьба выполнить, а не вопрос или объяснение.
 fn wants_action(text: &str) -> bool {
@@ -208,6 +211,7 @@ mod tests {
         assert_eq!(t("Deploy report-generator v2.12.2 в production. спасибо"), Some("run_shell"));
         assert_eq!(t("Вопрос: Удали ресурс database qa_scratch. Спасибо."), Some("delete_resource"));
         assert_eq!(t("Перезапусти report-generator на dev-k8s-node1."), Some("restart_service"));
+        assert_eq!(t("Отмасштабируй invoices-prod до 6 реплик."), Some("run_shell"));
         assert_eq!(t("Покажи пример RBAC-роли в Kubernetes с минимальными правами для чтения логов."), None);
         assert_eq!(t("Как посмотреть логи пода в prod?"), None);
         assert_eq!(t("Объясни, что делает kubectl scale, ничего не выполняй."), None);
