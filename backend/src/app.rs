@@ -276,7 +276,7 @@ async fn agent_inbox(State(state): State<Arc<AppState>>, headers: HeaderMap, Que
 // ---------- журнал ----------
 
 #[derive(Deserialize)]
-struct JournalQuery { since: Option<String>, until: Option<String>, decision: Option<String>, category: Option<String>, role: Option<String>, limit: Option<usize>, offset: Option<usize> }
+struct JournalQuery { since: Option<String>, until: Option<String>, decision: Option<String>, category: Option<String>, role: Option<String>, user_id: Option<String>, limit: Option<usize>, offset: Option<usize> }
 
 /// GET /v1/journal: фильтры по времени, решению, категории и роли.
 async fn journal_list(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q): Query<JournalQuery>) -> Response {
@@ -289,8 +289,27 @@ async fn journal_list(State(state): State<Arc<AppState>>, headers: HeaderMap, Qu
             && q.decision.as_deref().is_none_or(|d| d.is_empty() || json_name(&e.decision) == d)
             && q.category.as_deref().is_none_or(|c| c.is_empty() || json_name(&e.risk_category) == c)
             && q.role.as_deref().is_none_or(|r| r.is_empty() || json_name(&e.user_role) == r)
+            && q.user_id.as_deref().is_none_or(|u| u.is_empty() || e.user_id.as_deref() == Some(u)) // Фильтр по пользователю.
     }, q.offset.unwrap_or(0), q.limit.unwrap_or(50).min(500));
     Json(json!({"items": items, "total": total})).into_response()
+}
+
+/// GET /v1/users/{user_id}/history: история запросов пользователя для аудитора.
+/// Только чтение журнала: на решения /v1/check история пользователя не влияет (проверки по кейсу независимы).
+async fn user_history(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(user_id): Path<String>, Query(q): Query<JournalQuery>) -> Response {
+    if let Err(e) = require_reader(&state, &headers) { return e; } // Только с токеном.
+    let (all, total) = state.store.journal_query(|e| e.user_id.as_deref() == Some(user_id.as_str()), 0, usize::MAX); // Все записи пользователя, свежие первыми.
+    let mut by_decision: std::collections::BTreeMap<String, usize> = Default::default(); // Сколько allow/confirm/block.
+    let mut by_category: std::collections::BTreeMap<String, usize> = Default::default(); // Категории атак.
+    for e in &all {
+        *by_decision.entry(json_name(&e.decision)).or_default() += 1;
+        if e.risk_category != crate::contract::RiskCategory::None && e.risk_category != crate::contract::RiskCategory::SensitiveAction { *by_category.entry(json_name(&e.risk_category)).or_default() += 1; }
+    }
+    let hour_ago = store::iso_from(unix_now().saturating_sub(3600), 0); // Граница последнего часа.
+    let blocks_last_hour = all.iter().filter(|e| e.decision == Decision::Block && e.ts.as_str() >= hour_ago.as_str()).count(); // Недавние блокировки.
+    let items: Vec<_> = all.into_iter().skip(q.offset.unwrap_or(0)).take(q.limit.unwrap_or(50).min(500)).collect(); // Страница истории.
+    Json(json!({"user_id": user_id, "total": total, "by_decision": by_decision, "attack_categories": by_category,
+        "blocks_last_hour": blocks_last_hour, "items": items})).into_response()
 }
 
 /// Имя enum так, как оно выглядит в JSON (snake_case).
@@ -482,6 +501,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/demo/confirm", post(demo_confirm))
         .route("/v1/agent/inbox", get(agent_inbox))
         .route("/v1/journal", get(journal_list))
+        .route("/v1/users/{user_id}/history", get(user_history))
         .route("/v1/policy", get(get_policy).put(put_policy))
         .route("/v1/policy/validate", post(validate_policy))
         .route("/v1/policy/history", get(policy_history))

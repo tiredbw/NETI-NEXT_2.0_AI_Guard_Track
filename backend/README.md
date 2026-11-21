@@ -45,7 +45,8 @@ cargo run --release
 | `POST /v1/demo/submit` | Проверка и путь до заглушки агента: allow → квитанция, block → не передано, confirm → ожидание подтверждения (10 мин) |
 | `POST /v1/demo/confirm` | Одноразовое подтверждение автором неизменного запроса (`request_hash`): 403 чужой, 409 изменён/использован, 410 истёк |
 | `GET /v1/agent/inbox` | Что реально получила заглушка агента. Нужен `X-Admin-Token` (админ или аудитор) |
-| `GET /v1/journal` | Журнал: `since`, `until`, `decision`, `category`, `role`, `limit`, `offset`. Нужен `X-Admin-Token` |
+| `GET /v1/journal` | Журнал: `since`, `until`, `decision`, `category`, `role`, `user_id`, `limit`, `offset`. Нужен `X-Admin-Token` |
+| `GET /v1/users/{user_id}/history` | История пользователя для аудитора: его запросы (без значений секретов), счёт allow/confirm/block, категории атак, блокировки за последний час. Только чтение; на решения `/v1/check` не влияет, проверки по кейсу независимы. Нужен `X-Admin-Token` или `X-Audit-Token` |
 | `GET /v1/policy`, `GET /v1/policy/history` | Действующая политика с версией, автором и временем; история версий. Нужен `X-Admin-Token` |
 | `POST /v1/policy/validate` | Проверка YAML без применения. Нужен `X-Admin-Token` |
 | `PUT /v1/policy` | Применение с `X-Admin-Token`: 401 без токена, 403 неверный, 422 ошибки валидации |
