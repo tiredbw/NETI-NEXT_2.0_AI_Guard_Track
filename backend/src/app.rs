@@ -129,9 +129,10 @@ async fn evaluate(state: &AppState, raw: Value) -> Result<(CheckResponse, CheckR
         }
         if let Some(hit) = &rule_hit { crate::rules::apply(&mut d, hit); } // Правила только усиливают ответ модели.
         let weak = matches!(d.category, crate::contract::RiskCategory::None | crate::contract::RiskCategory::SensitiveAction); // Атаки модель не увидела.
-        if d.tool.is_none() && weak { // Qwen не назвал инструмент («требует уточнения»), а текст — явная просьба действия.
+        if weak && (d.tool.is_none() || d.action == "ask") { // Qwen не назвал инструмент или счёл просьбу вопросом («требует уточнения»), а текст — явная просьба действия.
             if let Some(t) = crate::rules::infer_tool(&prompt).filter(|t| *t == "delete_resource" || env.env != crate::contract::Env::Unknown) { // Без окружения — только удаление.
-                d.tool = Some(t.into()); d.action = "execute".into(); inferred_tool = Some(t); // Дальше обычная матрица прав из YAML.
+                if d.tool.is_none() { d.tool = Some(t.into()); } // Инструмент модели, если назван, остаётся.
+                d.action = "execute".into(); inferred_tool = Some(t); // Дальше обычная матрица прав из YAML.
             }
         }
         d
