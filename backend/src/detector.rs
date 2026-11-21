@@ -73,8 +73,26 @@ forbidden_action: disable_audit_or_wipe_logs, pipe_remote_script_to_shell, add_s
 secrets: none, names (нужны только имена секретов), values (нужны значения паролей, токенов, ключей). \
 reason: 3–6 слов по-русски без цитирования секретов. Ответь только JSON.";
 
+/// Облегчённый режим для запуска без видеокарты: DETECTOR_LITE=1.
+/// Модель отвечает без текстового пояснения, контекст меньше, истории и раскодированных вариантов меньше.
+/// На GPU-режим не влияет: без переменной всё как раньше.
+pub fn lite() -> bool {
+    static LITE: std::sync::OnceLock<bool> = std::sync::OnceLock::new(); // Читаем окружение один раз.
+    *LITE.get_or_init(|| matches!(std::env::var("DETECTOR_LITE").as_deref(), Ok("1") | Ok("true"))) // 1 или true включают режим.
+}
+
 /// JSON-схема ответа для параметра format: Ollama ограничивает генерацию этой схемой.
 fn output_schema() -> serde_json::Value {
+    let mut schema = full_schema(); // Полная схема.
+    if lite() { // В облегчённом режиме пояснение не генерируем: это самые дорогие токены на CPU.
+        schema["properties"].as_object_mut().map(|p| p.remove("reason")); // Убираем поле из свойств.
+        schema["required"] = json!(["category", "risk_level", "tool", "action", "forbidden_action", "secrets"]); // И из обязательных.
+    }
+    schema // Готовая схема.
+}
+
+/// Полная схема ответа с полем reason.
+fn full_schema() -> serde_json::Value {
     json!({
         "type": "object", // Ответ — объект.
         "properties": {
@@ -90,13 +108,13 @@ fn output_schema() -> serde_json::Value {
     })
 }
 
-/// Предел длины ответа модели в токенах.
-const NUM_PREDICT: usize = 160;
+/// Предел длины ответа модели в токенах: 160 обычно, 80 в облегчённом режиме (ответ без пояснения короче).
+fn num_predict() -> usize { if lite() { 80 } else { 160 } }
 
 /// Размер контекста модели: OLLAMA_NUM_CTX, по умолчанию 8192. Меньше контекст — меньше VRAM под KV-кэш.
 pub fn num_ctx() -> usize {
     static CTX: std::sync::OnceLock<usize> = std::sync::OnceLock::new(); // Читаем окружение один раз.
-    *CTX.get_or_init(|| std::env::var("OLLAMA_NUM_CTX").ok().and_then(|v| v.parse().ok()).filter(|&n| n >= 2048).unwrap_or(8192))
+    *CTX.get_or_init(|| std::env::var("OLLAMA_NUM_CTX").ok().and_then(|v| v.parse().ok()).filter(|&n| n >= 2048).unwrap_or(if lite() { 4096 } else { 8192 }))
 }
 
 /// Сколько символов данных помещается в контекст рядом с системным промптом и ответом.
@@ -104,7 +122,7 @@ pub fn num_ctx() -> usize {
 /// Иначе Ollama молча обрежет начало и модель потеряет системный промпт или сам запрос.
 pub fn char_budget(ctx_tokens: usize) -> usize {
     let system = SYSTEM_PROMPT.chars().count() * 2 / 5; // Токены системного промпта.
-    let tokens = ctx_tokens.saturating_sub(system + NUM_PREDICT + 200); // 200 — запас на разметку чата.
+    let tokens = ctx_tokens.saturating_sub(system + num_predict() + 200); // 200 — запас на разметку чата.
     tokens * 5 / 2 // Обратно в символы.
 }
 
@@ -116,7 +134,7 @@ pub fn request_body(model: &str, user_message: &str) -> serde_json::Value {
         "think": false, // Без рассуждений: экономит секунды.
         "keep_alive": -1, // Модель остаётся в памяти навсегда.
         "format": output_schema(), // Ограничиваем вывод схемой.
-        "options": {"temperature": 0, "num_predict": NUM_PREDICT, "num_ctx": num_ctx()}, // Детерминированно и коротко.
+        "options": {"temperature": 0, "num_predict": num_predict(), "num_ctx": num_ctx()}, // Детерминированно и коротко.
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT}, // Постоянный системный промпт.
             {"role": "user", "content": user_message} // Данные запроса.
@@ -152,7 +170,7 @@ pub fn build_user_message_within(req: &CheckRequest, normalized_prompt: &str, bu
     let att_parts: Vec<String> = attachments.iter().map(|a| clip(&crate::normalize::clean(&a.content), 3000.min(att_total / attachments.len().max(1)))).collect(); // Поровну на вложение, без невидимых символов.
     left = left.saturating_sub(att_parts.iter().map(|p| p.chars().count()).sum::<usize>());
     let mut history = Vec::new(); // Реплики от свежих к старым, пока хватает места.
-    for turn in ctx.history.iter().rev().take(8) { // Последние 8 реплик.
+    for turn in ctx.history.iter().rev().take(if lite() { 4 } else { 8 }) { // Последние 8 реплик (4 в облегчённом режиме).
         if left < 80 { break; } // Места почти нет — старые реплики не берём.
         let part = clip(&crate::normalize::clean(&turn.content), 1500.min(left)); // Реплика в пределах остатка, без невидимых символов.
         left = left.saturating_sub(part.chars().count());
@@ -176,7 +194,7 @@ pub fn build_user_message_within(req: &CheckRequest, normalized_prompt: &str, bu
     let mut extra = 0; // Сколько вариантов уже добавили.
     for (text, source) in att_texts.chain(hist_texts) { // Каждый источник.
         for (kind, decoded) in crate::normalize::hidden_variants(text).into_iter().take(2) { // Не больше двух вариантов на источник.
-            if extra >= 4 || left < 200 { break; } // Общий предел: четыре варианта и остаток бюджета.
+            if extra >= if lite() { 2 } else { 4 } || left < 200 { break; } // Общий предел: четыре варианта (два в облегчённом режиме) и остаток бюджета.
             let part = clip(&decoded, 600.min(left / 2)); // Коротко.
             left = left.saturating_sub(part.chars().count());
             out.push_str(&format!("<decoded kind=\"{kind}\" source=\"{source}\">\n{part}\n</decoded>\n")); // Раскодированный текст с указанием источника.
