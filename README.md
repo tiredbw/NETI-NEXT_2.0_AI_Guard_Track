@@ -7,7 +7,7 @@
 | Часть | Где | Что |
 |---|---|---|
 | Сервис | [`backend/`](backend/README.md) | Rust (Axum): `/v1/check`, демо-путь до заглушки агента, журнал, политика, сессии |
-| Модель | Ollama, `qwen3.5:4b` | Обязательна на каждой проверке; без ответа модели — `block` (fail-closed) |
+| Модель | Ollama, `astraguard-ft` (qwen3.5:4b, дообученная LoRA) | Обязательна на каждой проверке; без ответа модели — `block` (fail-closed) |
 | Политика | [`policies/security_policy.yaml`](policies/security_policy.yaml) | Файл кейса; перечитывается без перезапуска |
 | Интерфейс | [`frontend/`](frontend/README.md) | HTML/CSS/JS без сборки; сервис раздаёт его на `/` |
 | Обучение и наборы | [`backend/train/`](backend/train), [`eval/`](eval/README.md) | TF-IDF, разбиение dev на группы, свой набор проверки |
@@ -17,8 +17,7 @@
 ## Быстрый запуск
 
 ```bash
-ollama pull qwen3.5:4b
-cd backend
+cd backend/models && ollama create astraguard-ft -f Modelfile && cd ..   # GGUF положить рядом с Modelfile, см. backend/README.md
 ADMIN_TOKEN=<случайная строка> cargo run --release
 ```
 

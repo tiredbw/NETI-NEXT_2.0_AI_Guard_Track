@@ -6,10 +6,14 @@
 ## Запуск
 
 ```bash
-ollama pull qwen3.5:4b
-cd backend
+# Дообученная модель (по умолчанию): положить astraguard-qwen4b.fixed.gguf в backend/models/ и один раз создать её в Ollama
+cd backend/models && ollama create astraguard-ft -f Modelfile && cd ..
 cargo run --release
 ```
+
+Базовая модель без дообучения: `ollama pull qwen3.5:4b` и `OLLAMA_MODEL=qwen3.5:4b`.
+GGUF (2,8 ГБ) в git не хранится: файл выдаёт команда, сборка описана в `backend/train/` (ветка `feat/detector-finetune`).
+Если модели нет в Ollama, сервис отвечает `block` на всё (fail-closed): проверьте `curl http://127.0.0.1:8000/health` и строку `detector warmup ... ready=true` в логе.
 
 Переменные окружения:
 
@@ -18,7 +22,7 @@ cargo run --release
 | `BIND` | `0.0.0.0:8000` | Адрес сервера |
 | `POLICY_PATH` | `../policies/security_policy.yaml` | Файл политики |
 | `OLLAMA_URL` | `http://127.0.0.1:11434` | Адрес Ollama |
-| `OLLAMA_MODEL` | `qwen3.5:4b` | Модель |
+| `OLLAMA_MODEL` | `astraguard-ft` | Модель в Ollama: дообученная `astraguard-ft` или базовая `qwen3.5:4b` |
 | `DETECTOR_TIMEOUT_MS` | `8000` | Таймаут модели; при превышении `block` |
 | `GUARD_MODE` | `gpu` | Режим в `/health` |
 | `OLLAMA_NUM_CTX` | `8192` | Контекст модели в токенах. 4096 экономит VRAM под KV-кэш; длинная история и вложения тогда сильнее обрезаются (запрос и вложения в приоритете) |
@@ -82,7 +86,7 @@ cargo run --release
 
 Время почти целиком — генерация ответа модели (~70 токенов); `examples/dump_requests.rs` выгружает тела запросов для замеров по этапам.
 
-Версии для воспроизводимости (заполнить с сервера перед защитой): `ollama --version`, digest модели из `ollama list` (столбец ID для `qwen3.5:4b`), `rustc --version`, коммит.
+Версии для воспроизводимости (заполнить с сервера перед защитой): `ollama --version`, digest модели из `ollama list` (столбец ID для `astraguard-ft`), `rustc --version`, коммит.
 
 Как мерить на сервере (лимит кейса: 8 GB VRAM на всё решение, p95 ≤ 3 с, лучше ≤ 2,5 с):
 - VRAM: во время прогона `nvidia-smi --query-gpu=memory.used --format=csv -l 1` и `ollama ps` (размер и доля GPU у модели). Сравнить `OLLAMA_NUM_CTX=8192` и `4096`: KV-кэш уменьшится, задержка обычно тоже.

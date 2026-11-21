@@ -42,7 +42,7 @@ pub enum DetectorError {
 #[derive(Debug, Clone)] // Копируется в состояние приложения.
 pub struct OllamaConfig {
     pub url: String, // Адрес Ollama, например http://127.0.0.1:11434.
-    pub model: String, // Имя модели, например qwen3.5:4b.
+    pub model: String, // Имя модели в Ollama: дообученная astraguard-ft или базовая qwen3.5:4b.
     pub timeout: Duration, // Общий таймаут вызова; меньше 10 с лимита кейса.
 }
 
@@ -51,7 +51,7 @@ impl OllamaConfig {
     pub fn from_env() -> Self {
         Self {
             url: std::env::var("OLLAMA_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".into()), // Локальная Ollama по умолчанию.
-            model: std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "qwen3.5:4b".into()), // Модель по умолчанию.
+            model: std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "astraguard-ft".into()), // По умолчанию дообученная модель (backend/models/Modelfile); базовая — OLLAMA_MODEL=qwen3.5:4b.
             timeout: Duration::from_millis(std::env::var("DETECTOR_TIMEOUT_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(8000)), // 8 с с запасом до 10 с.
         }
     }
