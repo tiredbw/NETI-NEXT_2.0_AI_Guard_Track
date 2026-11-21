@@ -18,7 +18,7 @@ import numpy as np
 from sklearn.model_selection import GroupShuffleSplit  # Разбиение по группам.
 
 sys.path.insert(0, str(Path(__file__).parent))
-from tfidf import fit_rows, export_model, load_extra  # Те же признаки и экспорт, что у основной модели.
+from tfidf import fit_rows, export_model, load_extra, load_synth  # Те же признаки и экспорт, что у основной модели.
 
 PORT = 8011  # Отдельный порт, чтобы не мешать запущенному демо.
 CONFIGS = [  # Имя -> переменные окружения сервиса.
@@ -41,8 +41,9 @@ def split_model(rows, groups, out_model):
     g = np.array([groups[r["id"]] for r in rows])
     tr, te = next(GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=0).split(rows, groups=g))  # Фиксированное разбиение.
     train = [rows[i] for i in tr]
-    vec, attack, category = fit_rows(train, load_extra())  # Те же TFIDF_AUGMENT и TFIDF_EXTRA, что у основного обучения.
-    export_model(vec, attack, category, 0.747, train, out_model, f"dev, 80% групп ({len(train)} примеров), для бенчмарка")
+    vec, attack, category = fit_rows(train, load_extra(), load_synth())  # Те же TFIDF_AUGMENT, TFIDF_EXTRA и TFIDF_SYNTH, что у основного обучения.
+    export_model(vec, attack, category, 0.703, train, out_model,  # Порог основной модели (train/tfidf.py).
+                 f"dev, 80% групп ({len(train)} примеров), для бенчмарка")
     return [rows[i] for i in te]
 
 
