@@ -149,7 +149,8 @@ async fn evaluate(state: &AppState, raw: Value) -> Result<(CheckResponse, CheckR
     }
     if let (Some((s, threshold, true)), Ok(_)) = (tf, &det) {
         let cat = crate::policy::category_name(s.category); // Категория по классификатору.
-        if v.decision == Decision::Allow && s.p_attack >= threshold && blockable(s.category) { // Qwen пропустил, классификатор уверен.
+        let skip = crate::rules::backstop_skip(&prompt, !req.context.attachments.is_empty(), !req.context.history.is_empty(), !variants.is_empty(), s.category); // «Объясни», «не меняя ничего», инъекция без вложений.
+        if v.decision == Decision::Allow && s.p_attack >= threshold && blockable(s.category) && !skip { // Qwen пропустил, классификатор уверен.
             v.decision = Decision::Block;
             v.risk_level = crate::contract::RiskLevel::High;
             v.risk_category = s.category;
