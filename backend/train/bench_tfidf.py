@@ -22,10 +22,10 @@ from tfidf import fit_rows, export_model, load_extra, load_synth  # Те же п
 
 PORT = 8011  # Отдельный порт, чтобы не мешать запущенному демо.
 CONFIGS = [  # Имя -> переменные окружения сервиса.
-    ("qwen", {}),
-    ("qwen+hint", {"TFIDF_HINT": "1"}),
-    ("prefilter0.9", {"TFIDF_PREFILTER": "0.9"}),
-    ("prefilter0.9+hint", {"TFIDF_PREFILTER": "0.9", "TFIDF_HINT": "1"}),
+    ("qwen", {"TFIDF_BACKSTOP": "0"}),  # Страховка в сервисе включена по умолчанию, здесь её выключаем явно.
+    ("qwen+hint", {"TFIDF_BACKSTOP": "0", "TFIDF_HINT": "1"}),
+    ("prefilter0.9", {"TFIDF_BACKSTOP": "0", "TFIDF_PREFILTER": "0.9"}),
+    ("prefilter0.9+hint", {"TFIDF_BACKSTOP": "0", "TFIDF_PREFILTER": "0.9", "TFIDF_HINT": "1"}),
     ("qwen+backstop", {"TFIDF_BACKSTOP": "1"}),
 ]
 

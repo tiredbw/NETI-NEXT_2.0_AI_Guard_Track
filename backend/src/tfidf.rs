@@ -6,7 +6,7 @@
 //! чтобы расхождение Rust и Python не прошло незаметно.
 //!
 //! Страховка: если Qwen и политика дали allow, а классификатор уверенно видит атаку (p >= порога),
-//! решение меняется на block. Включается TFIDF_BACKSTOP=1; сигнал в signals пишется всегда.
+//! решение меняется на block. Включена по умолчанию, выключается TFIDF_BACKSTOP=0; сигнал в signals пишется всегда.
 
 use crate::contract::{CheckRequest, RiskCategory}; // Вход и категории.
 use serde::Deserialize; // Разбор JSON модели.
@@ -40,7 +40,7 @@ struct Control {
 pub struct Tfidf {
     m: ModelFile, // Веса и словарь.
     pub threshold: f64, // Порог страховки (можно переопределить TFIDF_THRESHOLD).
-    pub backstop: bool, // Страховка включена (TFIDF_BACKSTOP=1).
+    pub backstop: bool, // Страховка включена (по умолчанию; TFIDF_BACKSTOP=0 выключает).
     pub prefilter: Option<f64>, // Быстрый фильтр до Qwen: при p >= порога модель не вызывается (TFIDF_PREFILTER=0.9).
     pub hint: bool, // Передавать оценку TF-IDF в сообщение для Qwen (TFIDF_HINT=1).
 }
@@ -69,7 +69,7 @@ impl Tfidf {
         let m: ModelFile = serde_json::from_str(&raw).map_err(|e| format!("{path}: {e}"))?; // Разбор.
         if m.format != "astraguard-tfidf-1" { return Err(format!("неизвестный формат {}", m.format)); } // Версия формата.
         let threshold = std::env::var("TFIDF_THRESHOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(m.threshold); // Порог.
-        let backstop = std::env::var("TFIDF_BACKSTOP").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false); // По умолчанию выключена.
+        let backstop = std::env::var("TFIDF_BACKSTOP").map(|v| !(v == "0" || v.eq_ignore_ascii_case("false"))).unwrap_or(true); // По умолчанию включена: на всём dev с Qwen +0.022.
         let prefilter = std::env::var("TFIDF_PREFILTER").ok().and_then(|v| v.parse().ok()).filter(|p: &f64| *p > 0.0 && *p <= 1.0); // По умолчанию выключен.
         let hint = std::env::var("TFIDF_HINT").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false); // По умолчанию выключена.
         let t = Tfidf { m, threshold, backstop, prefilter, hint }; // Модель.
