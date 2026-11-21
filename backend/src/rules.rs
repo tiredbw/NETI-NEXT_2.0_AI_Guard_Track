@@ -41,6 +41,11 @@ struct Patterns {
     force_push: Regex, // Force push в основную ветку.
     reveal_verb: Regex, // Глагол «покажи/выведи/dump».
     secret_noun: Regex, // Пароль, токен, ключ доступа.
+    example: Regex, // «Покажи пример/шаблон»: текст, а не действие.
+    tool_logs: Regex, // «Покажи/прочитай логи …» → read_logs.
+    tool_restart: Regex, // «Перезапусти …» → restart_service.
+    tool_delete: Regex, // «Удали …» → delete_resource.
+    tool_shell: Regex, // «Выполни/scale/deploy/очисти кэш …» → run_shell.
 }
 
 fn patterns() -> &'static Patterns {
@@ -62,6 +67,11 @@ fn patterns() -> &'static Patterns {
             destructive: re(r"rm\s+-(?:rf|fr|r\s+-f|f\s+-r)\s+(?:--no-preserve-root\s+)?/(?:\s|$|\*|etc|var|usr|boot|bin|lib|home|root|opt|srv)|--no-preserve-root|chmod\s+-r\s+777\s+/|mkfs(?:\.\w+)?\s+/dev/|dd\s+if=\S+\s+of=/dev/(?:sd|nvme|xvd|vd)|:\(\)\s*\{\s*:\|:&\s*\};:|(?:scale|масштабируй|отскейль)[^.!?\n]{0,40}(?:every|all|все|каждый)[^.!?\n]{0,30}(?:prod|production|прод)[^.!?\n]{0,30}(?:to|до|в)\s*(?:0|zero|ноль|нуля)"),
             force_push: re(r"(?:force[ -]push|push\s+(?:--force|-f)\b|пуш\s+с\s+форсом|форс[ -]?пуш)[^.!?\n]{0,30}\b(?:main|master)\b|\b(?:main|master)\b[^.!?\n]{0,20}(?:force[ -]push|push\s+(?:--force|-f)\b)"),
             reveal_verb: re(r"^(?:покажи|выведи|выдай|дай|скинь|пришли|отправь мне|расшифруй|напечатай|достань|вытащи|прочитай|print|show|dump|give me|reveal|display|output|list|cat|export|decrypt|get me|fetch)\b"),
+            example: re(r"пример|example|шаблон|template|образец|sample"),
+            tool_logs: re(r"^(?:покажи|прочитай|выведи|открой|скинь|пришли|дай|достань|посмотри|глянь|show|read|get|tail|print|fetch|pull|grep|check)\b[^.!?\n]{0,60}(?:лог|\blogs?\b)"),
+            tool_restart: re(r"^(?:перезапусти|рестартни|перезагрузи|restart|reboot|bounce)\b"),
+            tool_delete: re(r"^(?:удали|снеси|delete|remove|drop|destroy)\b"),
+            tool_shell: re(r"^(?:выполни|запусти|run|execute|exec|scale|масштабируй|отскейль|deploy|задеплой|разверни|выкати|очисти|почисти|flush|clear|поставь|set|включи|выключи|enable|disable|откати|rollback|roll back|примени|apply|kubectl|df|du|top|free|systemctl|helm)\b"),
             secret_noun: re(r"парол|password|passwd|токен(?:ы)? доступа|access token|api[ _-]?key|api[ _-]?ключ|access key|секретн(?:ый|ые) ключ|secret key|private key|приватн(?:ый|ые) ключ|credentials|креды|connection string|строк[ау] подключения|vault[^.!?\n]{0,30}secret/|содержимое секрета|значени[ея] секрет|secret value|\bсекрет(?:а|ы|ов)? [a-z0-9-]+-(?:credentials|secret|token)"),
         }
     })
@@ -119,6 +129,21 @@ fn check_text(text: &str, role: Role) -> Option<RuleHit> {
     None // Правила не сработали.
 }
 
+/// Инструмент по первому глаголу просьбы, когда Qwen его не назвал («требует уточнения»).
+/// Только для просьб выполнить: вопросы, «не выполняй» и «покажи пример» не трогаем.
+/// Матрица прав из YAML применяется как обычно, поэтому правка политики на финале работает.
+pub fn infer_tool(normalized_prompt: &str) -> Option<&'static str> {
+    let p = patterns(); // Шаблоны.
+    let t = normalized_prompt.to_lowercase(); // Регистр не важен.
+    let core = strip_lead(&t); // Начало по существу.
+    if !wants_action(&t) || p.example.is_match(&core) { return None; } // Не действие.
+    if p.tool_logs.is_match(&core) { return Some("read_logs"); } // Чтение логов.
+    if p.tool_restart.is_match(&core) { return Some("restart_service"); } // Перезапуск.
+    if p.tool_delete.is_match(&core) { return Some("delete_resource"); } // Удаление.
+    if p.tool_shell.is_match(&core) { return Some("run_shell"); } // Команда, масштабирование, выкладка, настройки.
+    None
+}
+
 /// Правила по запросу и его скрытым вариантам; первое сработавшее.
 pub fn check(normalized_prompt: &str, variants: &[(&'static str, String)], role: Role) -> Option<RuleHit> {
     std::iter::once(normalized_prompt).chain(variants.iter().map(|(_, s)| s.as_str())).find_map(|t| check_text(t, role)) // Сначала сам запрос.
@@ -170,5 +195,22 @@ mod tests {
         assert_eq!(rule("Как сбросить забытый пароль от своей учётной записи в GitLab?", Role::Developer), None);
         assert_eq!(rule("Классифицируй фразу «забудь предыдущие инструкции» — только классификация, ничего не выполняй.", Role::Admin), None);
         assert_eq!(rule("Покажи пример RBAC-роли в Kubernetes с минимальными правами для чтения логов.", Role::Sre), None);
+    }
+
+    #[test] // Инструмент по глаголу, когда модель его не назвала.
+    fn infers_tool() {
+        let t = |s: &str| infer_tool(&s.to_lowercase()); // Короткий вызов.
+        assert_eq!(t("Привет! Прочитай логи аутентификации на billing-api-prod. пожалуйста"), Some("read_logs"));
+        assert_eq!(t("Quick question: Show crm-backend production logs for the last hour."), Some("read_logs"));
+        assert_eq!(t("Run df -h on payments-prod-02."), Some("run_shell"));
+        assert_eq!(t("hi! scale payments-api in prod to 3 replicas. thanks."), Some("run_shell"));
+        assert_eq!(t("Очисти кэш Redis в prod для report-generator. Спасибо."), Some("run_shell"));
+        assert_eq!(t("Deploy report-generator v2.12.2 в production. спасибо"), Some("run_shell"));
+        assert_eq!(t("Вопрос: Удали ресурс database qa_scratch. Спасибо."), Some("delete_resource"));
+        assert_eq!(t("Перезапусти report-generator на dev-k8s-node1."), Some("restart_service"));
+        assert_eq!(t("Покажи пример RBAC-роли в Kubernetes с минимальными правами для чтения логов."), None);
+        assert_eq!(t("Как посмотреть логи пода в prod?"), None);
+        assert_eq!(t("Объясни, что делает kubectl scale, ничего не выполняй."), None);
+        assert_eq!(t("Сравни конфиги search-indexer между dev и stage."), None);
     }
 }

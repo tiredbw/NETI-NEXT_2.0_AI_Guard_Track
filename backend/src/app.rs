@@ -122,11 +122,18 @@ async fn evaluate(state: &AppState, raw: Value) -> Result<(CheckResponse, CheckR
     let model_reason = det.as_ref().ok().map(|d| d.reason.clone()).unwrap_or_default(); // Пояснение самой модели для сигнала model.
     let followup = crate::history::secret_followup(&req, &prompt); // Просьба выдать секреты, о которых шла речь раньше.
     let rule_hit = crate::rules::check(&prompt, &variants, req.context.user_role); // Детерминированные правила.
+    let mut inferred_tool: Option<&'static str> = None; // Инструмент, найденный правилами вместо Qwen.
     let det = det.map(|mut d| {
         if let Some(word) = &followup {
             if d.secrets != "values" { d.secrets = "values".into(); d.reason = format!("реплика ссылается на предыдущую о «{word}» и просит выдать содержимое"); }
         }
         if let Some(hit) = &rule_hit { crate::rules::apply(&mut d, hit); } // Правила только усиливают ответ модели.
+        let weak = matches!(d.category, crate::contract::RiskCategory::None | crate::contract::RiskCategory::SensitiveAction); // Атаки модель не увидела.
+        if d.tool.is_none() && weak { // Qwen не назвал инструмент («требует уточнения»), а текст — явная просьба действия.
+            if let Some(t) = crate::rules::infer_tool(&prompt).filter(|t| *t == "delete_resource" || env.env != crate::contract::Env::Unknown) { // Без окружения — только удаление.
+                d.tool = Some(t.into()); d.action = "execute".into(); inferred_tool = Some(t); // Дальше обычная матрица прав из YAML.
+            }
+        }
         d
     });
     let mut v = decide::decide(&policy, req.context.user_role, &env, det.as_ref().map_err(|e| *e));
@@ -156,6 +163,7 @@ async fn evaluate(state: &AppState, raw: Value) -> Result<(CheckResponse, CheckR
     }
     if let Some((s, threshold, _)) = tf { signals.push(Signal { source: "tfidf".into(), label: crate::policy::category_name(s.category).into(), detail: format!("p(атака)={:.2}, порог {:.2}", s.p_attack, threshold) }); }
     if let Some(hit) = &rule_hit { signals.push(Signal { source: "rules".into(), label: hit.rule.into(), detail: hit.detail.into() }); }
+    if let Some(t) = inferred_tool { signals.push(Signal { source: "rules".into(), label: "rules.tool_from_verb".into(), detail: format!("модель не назвала инструмент, по глаголу просьбы это {t}") }); }
     signals.push(Signal { source: "policy".into(), label: format!("{:?}", v.decision).to_lowercase(), detail: v.policy_rule.clone().unwrap_or_else(|| "нет правила".into()) });
     if !env.evidence.is_empty() { signals.push(Signal { source: "rules".into(), label: "env".into(), detail: env.evidence.clone() }); }
     if !req.context.attachments.is_empty() { signals.push(Signal { source: "attachment".into(), label: "вложения".into(), detail: format!("{} шт. переданы детектору как данные", req.context.attachments.len()) }); }
