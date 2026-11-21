@@ -41,6 +41,27 @@ def fit(texts, is_attack, labels):
     return vec, attack, category
 
 
+def export_model(vec, attack, category, threshold, rows, out_path, trained_on):
+    """Пишет модель в JSON для Rust; контрольные примеры Rust сверяет при загрузке."""
+    export = {
+        "format": "astraguard-tfidf-1",
+        "analyzer": VEC["analyzer"], "ngram_range": list(VEC["ngram_range"]), "lowercase": True, "sublinear_tf": True,
+        "threshold": round(threshold, 4),
+        "vocabulary": {term: int(i) for term, i in vec.vocabulary_.items()}, "idf": [round(float(x), 6) for x in vec.idf_],
+        "attack_coef": [round(float(x), 6) for x in attack.coef_[0]], "attack_intercept": round(float(attack.intercept_[0]), 6),
+        "categories": list(category.classes_),
+        "category_coef": [[round(float(x), 6) for x in row] for row in category.coef_], "category_intercept": [round(float(x), 6) for x in category.intercept_],
+        "trained_on": trained_on, "cv": "GroupKFold(5) по группам groups.py, порог: не больше 1 ложной блокировки вне обучения",
+    }
+    controls = []
+    for r in rows[:5]:
+        X = vec.transform([features_text(r)])
+        controls.append({"text": features_text(r), "p_attack": round(float(attack.predict_proba(X)[0, 1]), 6), "category": str(category.predict(X)[0])})
+    export["controls"] = controls
+    json.dump(export, open(out_path, "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
+    return controls
+
+
 def main(dev_path, groups_path, out_path, val_path=None):
     rows = [json.loads(l) for l in open(dev_path, encoding="utf-8")]
     groups = json.load(open(groups_path, encoding="utf-8"))["groups"]
@@ -76,22 +97,7 @@ def main(dev_path, groups_path, out_path, val_path=None):
         va = np.array([r["expected_decision"] == "block" for r in val])
         print(f"Свой набор ({len(val)}): атак поймано {(pv[va] >= threshold).sum()}/{va.sum()}, ложных {(pv[~va] >= threshold).sum()}/{(~va).sum()}")
 
-    export = {
-        "format": "astraguard-tfidf-1",
-        "analyzer": VEC["analyzer"], "ngram_range": list(VEC["ngram_range"]), "lowercase": True, "sublinear_tf": True,
-        "threshold": round(threshold, 4),
-        "vocabulary": {term: int(i) for term, i in vec.vocabulary_.items()}, "idf": [round(float(x), 6) for x in vec.idf_],
-        "attack_coef": [round(float(x), 6) for x in attack.coef_[0]], "attack_intercept": round(float(attack.intercept_[0]), 6),
-        "categories": list(category.classes_),
-        "category_coef": [[round(float(x), 6) for x in row] for row in category.coef_], "category_intercept": [round(float(x), 6) for x in category.intercept_],
-        "trained_on": "public dev.jsonl (500 примеров)", "cv": "GroupKFold(5) по группам groups.py, порог: не больше 1 ложной блокировки вне обучения",
-    }
-    controls = []  # Контрольные примеры: Rust при загрузке сверяет свои вероятности с этими.
-    for r in rows[:5]:
-        X = vec.transform([features_text(r)])
-        controls.append({"text": features_text(r), "p_attack": round(float(attack.predict_proba(X)[0, 1]), 6), "category": str(category.predict(X)[0])})
-    export["controls"] = controls
-    json.dump(export, open(out_path, "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
+    controls = export_model(vec, attack, category, threshold, rows, out_path, "public dev.jsonl (500 примеров)")
     oof_path = str(Path(out_path).resolve().parents[2] / "eval" / "tfidf_oof_dev.json")  # Оценки вне обучения для честной симуляции страховки на прогонах Qwen.
     json.dump({r["id"]: {"p_attack": round(float(p), 6), "category": str(c)} for r, p, c in zip(rows, oof, oof_cat)}, open(oof_path, "w", encoding="utf-8"), ensure_ascii=False)
     print("контроль:", [(c["p_attack"], c["category"]) for c in controls], "; оценки вне обучения:", oof_path)

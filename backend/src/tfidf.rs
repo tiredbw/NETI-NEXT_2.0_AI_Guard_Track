@@ -41,6 +41,8 @@ pub struct Tfidf {
     m: ModelFile, // Веса и словарь.
     pub threshold: f64, // Порог страховки (можно переопределить TFIDF_THRESHOLD).
     pub backstop: bool, // Страховка включена (TFIDF_BACKSTOP=1).
+    pub prefilter: Option<f64>, // Быстрый фильтр до Qwen: при p >= порога модель не вызывается (TFIDF_PREFILTER=0.9).
+    pub hint: bool, // Передавать оценку TF-IDF в сообщение для Qwen (TFIDF_HINT=1).
 }
 
 /// Оценка классификатора для одного запроса.
@@ -68,7 +70,9 @@ impl Tfidf {
         if m.format != "astraguard-tfidf-1" { return Err(format!("неизвестный формат {}", m.format)); } // Версия формата.
         let threshold = std::env::var("TFIDF_THRESHOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(m.threshold); // Порог.
         let backstop = std::env::var("TFIDF_BACKSTOP").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false); // По умолчанию выключена.
-        let t = Tfidf { m, threshold, backstop }; // Модель.
+        let prefilter = std::env::var("TFIDF_PREFILTER").ok().and_then(|v| v.parse().ok()).filter(|p: &f64| *p > 0.0 && *p <= 1.0); // По умолчанию выключен.
+        let hint = std::env::var("TFIDF_HINT").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false); // По умолчанию выключена.
+        let t = Tfidf { m, threshold, backstop, prefilter, hint }; // Модель.
         for c in &t.m.controls { // Сверка с Python.
             let p = t.p_attack_text(&c.text); // Наша вероятность.
             if (p - c.p_attack).abs() > 1e-3 { return Err(format!("расхождение с sklearn: {p:.6} против {:.6}", c.p_attack)); } // Векторизация разошлась.

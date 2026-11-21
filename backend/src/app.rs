@@ -98,13 +98,30 @@ async fn evaluate(state: &AppState, raw: Value) -> Result<(CheckResponse, CheckR
         env_text.push_str(&hidden);
     }
     let env = envdetect::detect(&env_text, prod_masks, nonprod_masks);
-    let message = build_user_message(&req, &prompt);
-    let det = state.detector.classify(&message).await; // Почти всё время ответа.
+    let variants = normalize::hidden_variants(&req.user_prompt); // Раскодированные варианты запроса.
+    let tf = state.tfidf.as_ref().map(|t| (t.score(&req, &variants), t.threshold, t.backstop)); // TF-IDF до Qwen: микросекунды.
+    let blockable = |c: crate::contract::RiskCategory| { // Категория, которую политика блокирует.
+        let name = crate::policy::category_name(c);
+        policy.always_blocks(c) || policy.file.context_dependent.iter().any(|x| x == name)
+    };
+    // Быстрый фильтр (TFIDF_PREFILTER): уверенная атака блокируется без вызова Qwen.
+    let prefiltered = match (state.tfidf.as_ref().and_then(|t| t.prefilter), tf) {
+        (Some(limit), Some((s, _, _))) if s.p_attack >= limit && blockable(s.category) => Some(s),
+        _ => None,
+    };
+    let det = if let Some(s) = prefiltered {
+        Ok(crate::detector::DetectorOut { category: s.category, risk_level: crate::contract::RiskLevel::High, tool: None, forbidden_action: None, action: "execute".into(), secrets: "none".into(),
+            reason: format!("Qwen не вызывался: быстрый фильтр TF-IDF уверен в атаке (p={:.2}).", s.p_attack) })
+    } else {
+        let mut message = build_user_message(&req, &prompt);
+        if let (Some(true), Some((s, _, _))) = (state.tfidf.as_ref().map(|t| t.hint), tf) { // Подсказка классификатора для Qwen (TFIDF_HINT).
+            message.push_str(&format!("<classifier p_attack=\"{:.2}\" category=\"{}\">Оценка независимого классификатора по словам. Он часто ошибается на вопросах и учебных запросах, решай по смыслу.</classifier>\n", s.p_attack, crate::policy::category_name(s.category)));
+        }
+        state.detector.classify(&message).await // Почти всё время ответа.
+    };
     let model_reason = det.as_ref().ok().map(|d| d.reason.clone()).unwrap_or_default(); // Пояснение самой модели для сигнала model.
     let followup = crate::history::secret_followup(&req, &prompt); // Просьба выдать секреты, о которых шла речь раньше.
-    let variants = normalize::hidden_variants(&req.user_prompt); // Раскодированные варианты запроса.
     let rule_hit = crate::rules::check(&prompt, &variants, req.context.user_role); // Детерминированные правила.
-    let tf = state.tfidf.as_ref().map(|t| (t.score(&req, &variants), t.threshold, t.backstop)); // Второй сигнал, микросекунды.
     let det = det.map(|mut d| {
         if let Some(word) = &followup {
             if d.secrets != "values" { d.secrets = "values".into(); d.reason = format!("реплика ссылается на предыдущую о «{word}» и просит выдать содержимое"); }
@@ -124,8 +141,7 @@ async fn evaluate(state: &AppState, raw: Value) -> Result<(CheckResponse, CheckR
     }
     if let (Some((s, threshold, true)), Ok(_)) = (tf, &det) {
         let cat = crate::policy::category_name(s.category); // Категория по классификатору.
-        let blockable = policy.always_blocks(s.category) || policy.file.context_dependent.iter().any(|c| c == cat); // Категория блокируется политикой.
-        if v.decision == Decision::Allow && s.p_attack >= threshold && blockable { // Qwen пропустил, классификатор уверен.
+        if v.decision == Decision::Allow && s.p_attack >= threshold && blockable(s.category) { // Qwen пропустил, классификатор уверен.
             v.decision = Decision::Block;
             v.risk_level = crate::contract::RiskLevel::High;
             v.risk_category = s.category;
@@ -135,7 +151,7 @@ async fn evaluate(state: &AppState, raw: Value) -> Result<(CheckResponse, CheckR
     }
     let mut signals = Vec::new();
     match &det {
-        Ok(d) => signals.push(Signal { source: "model".into(), label: crate::policy::category_name(d.category).into(), detail: mask::mask_secrets(&model_reason) }),
+        Ok(d) => signals.push(Signal { source: "model".into(), label: if prefiltered.is_some() { "skipped".into() } else { crate::policy::category_name(d.category).into() }, detail: mask::mask_secrets(&model_reason) }),
         Err(e) => signals.push(Signal { source: "model".into(), label: "error".into(), detail: format!("{e:?}") }),
     }
     if let Some((s, threshold, _)) = tf { signals.push(Signal { source: "tfidf".into(), label: crate::policy::category_name(s.category).into(), detail: format!("p(атака)={:.2}, порог {:.2}", s.p_attack, threshold) }); }
