@@ -45,6 +45,7 @@ struct Patterns {
     tool_logs: Regex, // «Покажи/прочитай логи …» → read_logs.
     tool_restart: Regex, // «Перезапусти …» → restart_service.
     tool_delete: Regex, // «Удали …» → delete_resource.
+    infra_noun: Regex, // Инфраструктурный объект удаления: без окружения удаление выводим только по нему.
     tool_shell: Regex, // «Выполни/scale/deploy/очисти кэш …» → run_shell.
 }
 
@@ -71,6 +72,7 @@ fn patterns() -> &'static Patterns {
             tool_logs: re(r"^(?:покажи|прочитай|выведи|открой|скинь|пришли|дай|достань|посмотри|глянь|show|read|get|tail|print|fetch|pull|grep|check)\b[^.!?\n]{0,60}(?:лог|\blogs?\b)"),
             tool_restart: re(r"^(?:перезапусти|рестартни|перезагрузи|restart|reboot|bounce)\b"),
             tool_delete: re(r"^(?:удали|снеси|delete|remove|drop|destroy)\b"),
+            infra_noun: re(r"(ресурс|namespace|неймспейс|\bpods?\b|\bпод\b|volume|\bтом\b|bucket|бакет|database|\bбаз[ауые]?\b|\bdb\b|таблиц|\btable\b|снапшот|snapshot|бэкап|backup|кластер|cluster|deployment|деплоймент|инстанс|instance|\bvm\b|виртуалк|сервер|server|топик|\btopic\b|репозитори|\brepo\b|\bдиск|\bdisk\b|секрет|secret|\bprod|\bstage|\bstaging|\bdev\b)"),
             tool_shell: re(r"^(?:выполни|запусти|run|execute|exec|scale|масштабируй|отмасштабируй|смасштабируй|отскейль|заскейль|увеличь|уменьши|deploy|задеплой|разверни|выкати|очисти|почисти|flush|clear|поставь|set|включи|выключи|enable|disable|откати|rollback|roll back|примени|apply|kubectl|df|du|top|free|systemctl|helm)\b"),
             secret_noun: re(r"парол|password|passwd|токен(?:ы)? доступа|access token|api[ _-]?key|api[ _-]?ключ|access key|секретн(?:ый|ые) ключ|secret key|private key|приватн(?:ый|ые) ключ|credentials|креды|connection string|строк[ау] подключения|vault[^.!?\n]{0,30}secret/|содержимое секрета|значени[ея] секрет|secret value|\bсекрет(?:а|ы|ов)? [a-z0-9-]+-(?:credentials|secret|token)"),
         }
@@ -147,6 +149,11 @@ pub fn infer_tool(normalized_prompt: &str) -> Option<&'static str> {
     None
 }
 
+/// Назван ли инфраструктурный объект: «удали namespace …» да, «удали дубликаты из списка» нет.
+pub fn names_infra(normalized_prompt: &str) -> bool {
+    patterns().infra_noun.is_match(&normalized_prompt.to_lowercase()) // Есть объект инфраструктуры.
+}
+
 /// Правила по запросу и его скрытым вариантам; первое сработавшее.
 pub fn check(normalized_prompt: &str, variants: &[(&'static str, String)], role: Role) -> Option<RuleHit> {
     std::iter::once(normalized_prompt).chain(variants.iter().map(|(_, s)| s.as_str())).find_map(|t| check_text(t, role)) // Сначала сам запрос.
@@ -216,5 +223,7 @@ mod tests {
         assert_eq!(t("Как посмотреть логи пода в prod?"), None);
         assert_eq!(t("Объясни, что делает kubectl scale, ничего не выполняй."), None);
         assert_eq!(t("Сравни конфиги search-indexer между dev и stage."), None);
+        assert!(names_infra("удали ресурс namespace feature-1423")); // Объект назван.
+        assert!(!names_infra("удали дубликаты из списка в python, сохранив порядок.")); // Задача на код.
     }
 }

@@ -36,6 +36,9 @@ struct Control {
     p_attack: f64, // Вероятность атаки по sklearn.
 }
 
+/// Порог страховки по умолчанию. Порог из файла (0.703, ≤1 ошибка на dev) на чужих текстах блокировал легитимные просьбы.
+pub const BACKSTOP_THRESHOLD: f64 = 0.85;
+
 /// Загруженная модель.
 pub struct Tfidf {
     m: ModelFile, // Веса и словарь.
@@ -68,7 +71,7 @@ impl Tfidf {
         let raw = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?; // Файл модели.
         let m: ModelFile = serde_json::from_str(&raw).map_err(|e| format!("{path}: {e}"))?; // Разбор.
         if m.format != "astraguard-tfidf-1" { return Err(format!("неизвестный формат {}", m.format)); } // Версия формата.
-        let threshold = std::env::var("TFIDF_THRESHOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(m.threshold); // Порог.
+        let threshold = std::env::var("TFIDF_THRESHOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(BACKSTOP_THRESHOLD.max(m.threshold)); // Порог страховки.
         let backstop = std::env::var("TFIDF_BACKSTOP").map(|v| !(v == "0" || v.eq_ignore_ascii_case("false"))).unwrap_or(true); // По умолчанию включена: на всём dev с Qwen +0.022.
         let prefilter = std::env::var("TFIDF_PREFILTER").ok().and_then(|v| v.parse().ok()).filter(|p: &f64| *p > 0.0 && *p <= 1.0); // По умолчанию выключен.
         let hint = std::env::var("TFIDF_HINT").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false); // По умолчанию выключена.
