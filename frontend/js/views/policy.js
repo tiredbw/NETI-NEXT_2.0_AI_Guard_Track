@@ -29,18 +29,31 @@ const JURY_EDITS = [
   },
 ];
 
+// Редактор виден только при загруженной политике: без неё нечего править, а «Применить» отправил бы пустой YAML.
+function setEditorVisible(visible) {
+  els.editorBlock.hidden = !visible;
+}
+
 async function loadPolicy() {
   try {
     current = await api('GET', '/v1/policy');
     renderMeta();
     if (!els.editor.dataset.dirty) els.editor.value = current.yaml;
+    setEditorVisible(true);
     emit('policy', current.version);
   } catch (e) {
     if (isAuthError(e)) {
+      // Доступа нет или токен сброшен: прячем редактор вместе с прежним YAML и незавершённой правкой.
+      current = null;
+      delete els.editor.dataset.dirty;
+      els.editor.value = '';
+      clear(els.validation);
+      setEditorVisible(false);
       clear(els.meta).append(h('div', { class: 'banner error' }, authMessage(e)), tokenGate((t) => setAdminToken(t), 'Политика открывается с токеном администратора (просмотр и изменение) или аудитора (только просмотр).'));
       clear(els.history);
       return;
     }
+    setEditorVisible(Boolean(current));
     clear(els.meta).append(h('div', { class: 'banner error' }, errorText(e)));
   }
   loadHistory();
@@ -155,16 +168,18 @@ export function mount(el) {
   els.juryLog = h('div');
 
   const mockToken = mockAdminToken();
+  els.editorBlock = h('div', { hidden: true },
+    field('YAML политики', els.editor, 'Изменение применяется сразу: без правки кода, без перезапуска и без переобучения модели.'),
+    h('div', { class: 'inline-fields' }, field('Комментарий к версии', els.comment), field('Админ-токен', els.token)),
+    h('p', { class: 'muted small field-note' }, mockToken ? `Админ-токен мока: ${mockToken}. Токен хранится только в памяти вкладки.` : 'Токен хранится только в памяти этой вкладки.'),
+    h('div', { class: 'row' }, els.validate, els.apply, els.revert),
+    els.validation);
   el.append(
     h('div', { class: 'section-head' }, h('h2', {}, 'Политика безопасности'), h('span', { class: 'muted small' }, 'security_policy.yaml')),
     h('div', { class: 'grid-2' },
       h('div', { class: 'card' },
         els.meta,
-        field('YAML политики', els.editor, 'Изменение применяется сразу: без правки кода, без перезапуска и без переобучения модели.'),
-        h('div', { class: 'inline-fields' }, field('Комментарий к версии', els.comment), field('Админ-токен', els.token)),
-        h('p', { class: 'muted small field-note' }, mockToken ? `Админ-токен мока: ${mockToken}. Токен хранится только в памяти вкладки.` : 'Токен хранится только в памяти этой вкладки.'),
-        h('div', { class: 'row' }, els.validate, els.apply, els.revert),
-        els.validation),
+        els.editorBlock),
       h('div', {},
         h('div', { class: 'card' },
           h('h2', {}, 'Сценарий для жюри'),
@@ -174,6 +189,7 @@ export function mount(el) {
           h('h3', { class: 'mt-4' }, 'Готовые правки'),
           h('div', { class: 'stack' }, ...JURY_EDITS.map((ed) => h('div', {},
             h('button', { type: 'button', class: 'chip', onclick: () => {
+              if (!current) { toast('Сначала откройте политику токеном администратора: правка подставляется в действующий YAML.'); return; }
               const next = ed.apply(els.editor.value);
               if (next === els.editor.value) { toast('Правка не нашла нужное правило — возможно, она уже применена.'); return; }
               els.editor.value = next;
