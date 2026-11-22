@@ -12,7 +12,7 @@ cargo run --release
 ```
 
 Базовая модель без дообучения: `ollama pull qwen3.5:4b` и `OLLAMA_MODEL=qwen3.5:4b`.
-GGUF (2,8 ГБ) в git не хранится: файл выдаёт команда, сборка описана в `backend/train/` (ветка `feat/detector-finetune`).
+GGUF (2,8 ГБ) в git не хранится: скачать [с Google Drive](https://drive.google.com/drive/folders/1naIrO2Bc4f882FR5p5XNr5hOHYjTJYyG?usp=sharing); токенизатор входит в GGUF, сборка описана в `backend/train/` (ветка `feat/detector-finetune`).
 Если модели нет в Ollama, сервис отвечает `block` на всё (fail-closed): проверьте `curl http://127.0.0.1:8000/health` и строку `detector warmup ... ready=true` в логе.
 
 Переменные окружения:

@@ -18,7 +18,7 @@
 
 ### Windows: одна команда
 
-Нужны [Ollama](https://ollama.com), Rust (`rustup`) и файл модели `astraguard-qwen4b.fixed.gguf` в `backend/models/`
+Нужны [Ollama](https://ollama.com), Rust (`rustup`) и файл модели `astraguard-qwen4b.fixed.gguf` ([скачать, 2,8 ГБ](https://drive.google.com/drive/folders/1naIrO2Bc4f882FR5p5XNr5hOHYjTJYyG?usp=sharing)) в `backend/models/`
 (или уже созданная в Ollama модель `astraguard-ft`).
 
 ```powershell
