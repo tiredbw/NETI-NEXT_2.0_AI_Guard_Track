@@ -16,6 +16,22 @@
 
 ## Быстрый запуск
 
+### Windows: одна команда
+
+Нужны [Ollama](https://ollama.com), Rust (`rustup`) и файл модели `astraguard-qwen4b.fixed.gguf` в `backend/models/`
+(или уже созданная в Ollama модель `astraguard-ft`).
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\start.ps1          # первый запуск или после git pull: добавьте -Build
+```
+
+Скрипт проверяет Ollama и модель (при необходимости запускает `ollama serve` и выполняет `ollama create`), задаёт переменные
+боевого режима, берёт токены из `backend/.env.local` (создаёт их при первом запуске; файл в git не попадает), собирает сервис,
+ждёт прогрева модели и делает контрольный запрос. Если сервер упадёт, скрипт поднимет его снова через 5 секунд.
+Логи: `backend/logs/`. Режим итоговой оценки: **GPU** (RTX 4050 Laptop 6 ГБ: VRAM ≈ 3,8 ГБ, p95 ≈ 1,5 с на dev).
+
+### Вручную (Linux, macOS, Windows)
+
 ```bash
 cd backend/models && ollama create astraguard-ft -f Modelfile && cd ..   # GGUF положить рядом с Modelfile, см. backend/README.md
 ADMIN_TOKEN=<случайная строка> cargo run --release
